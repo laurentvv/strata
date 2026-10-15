@@ -8,7 +8,7 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
 ## Highlights
 
 - **Live scan**: the tree and the map fill in while the drive is read (about 12 s for a 3.75 M-file
-  drive on a fast SSD, 2 s for `C:\Windows`). Stop keeps what was found.
+  drive on a fast SSD, 3 to 8 s for `C:\Windows` depending on the cache). Stop keeps what was found.
 - **Proportional map** docked under (or beside) the tree, 5 nesting levels, individual files,
   free-space tile, follows the selection.
 - **Scan history**: every finished scan is stored; the Changes view ranks what grew or vanished since
@@ -56,7 +56,8 @@ Settings, scan history and snapshots live in `%APPDATA%\strata`.
 
 - The NTFS MFT fast scan is only tested on synthetic records; it falls back to the normal walker.
 - Windows is the target platform. Linux builds and passes its tests; macOS is not maintained.
-- Memory: about 105 MB on top of the 110 MB window for `C:\Windows`; about 1 GB peak for a 3.75 M-file drive.
+- Memory for `C:\Windows` (measured with `tools/measure.ps1`): about 330 MB peak and about 200 MB once the
+  scan is done; about 1 GB peak for a 3.75 M-file drive.
 
 ## Provenance
 
