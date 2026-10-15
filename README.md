@@ -56,8 +56,8 @@ Settings, scan history and snapshots live in `%APPDATA%\strata`.
 
 - The NTFS MFT fast scan is only tested on synthetic records; it falls back to the normal walker.
 - Windows is the target platform. Linux builds and passes its tests; macOS is not maintained.
-- Memory for `C:\Windows` (measured with `tools/measure.ps1`): about 330 MB peak and about 200 MB once the
-  scan is done; about 1 GB peak for a 3.75 M-file drive.
+- Memory for `C:\Windows` (measured with `tools/measure.ps1`): about 230 MB peak and about 160 MB once the
+  scan is done (110 MB of that is the window itself); about 1 GB peak for a 3.75 M-file drive.
 
 ## Provenance
 
