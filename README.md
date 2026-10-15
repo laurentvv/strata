@@ -10,7 +10,9 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
 - **Live scan**: the tree and the map fill in while the drive is read (about 12 s for a 3.75 M-file
   drive on a fast SSD, 3 to 8 s for `C:\Windows` depending on the cache). Stop keeps what was found.
 - **Proportional map** docked under (or beside) the tree, 5 nesting levels, individual files,
-  free-space tile, follows the selection.
+  free-space tile, follows the selection. Files are coloured by type (documents, images, video, audio,
+  archives, code, executables; a block of mixed files is cut into proportional strips), with details
+  on hover. Switch to colours by folder level in the View tab.
 - **Scan history**: every finished scan is stored; the Changes view ranks what grew or vanished since
   any earlier scan, with a size-over-time chart.
 - **Clean-up**: known reclaimable folders (`node_modules`, Cargo `target`, `__pycache__`,

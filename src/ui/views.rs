@@ -1,8 +1,8 @@
 //! Secondary views: treemap, folder chart, file types, ranked file lists.
 
-use super::treemap::{pie_angles, Rect as TRect};
+use super::treemap::{pie_angles, Mix, Rect as TRect};
 use crate::i18n::tr;
-use crate::analysis::types::{top_children, Category, TypeStat};
+use crate::analysis::types::{category_of_name, top_children, Category, TypeStat};
 use crate::scan::model::RankedFile;
 use crate::scan::{format_bytes, format_time, NodeId, Tree, NONE};
 use eframe::egui::{self, Color32, RichText, Sense};
@@ -140,12 +140,41 @@ pub struct MapStyle {
     pub labels: bool,
     /// Free bytes of the drive, shown as an extra tile when the shown folder is a drive root.
     pub free_space: Option<u64>,
+    /// Colour file tiles by file category instead of one warm tone.
+    pub by_type: bool,
 }
 
 impl Default for MapStyle {
     fn default() -> Self {
-        MapStyle { levels: 4, unique_files: false, headers: true, legend: true, labels: true, free_space: None }
+        MapStyle { levels: 4, unique_files: false, headers: true, legend: true, labels: true, free_space: None, by_type: true }
     }
+}
+
+/// Fill `rect` with one strip per file category, as wide as its share of the tile (along the longer
+/// side, biggest share first).
+fn paint_mix(painter: &egui::Painter, rect: egui::Rect, mix: &Mix, tint: impl Fn(Color32) -> Color32) {
+    let horizontal = rect.width() >= rect.height();
+    let len = if horizontal { rect.width() } else { rect.height() };
+    let mut order: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    order.sort_by_key(|&i| std::cmp::Reverse(mix[i]));
+    let mut acc = 0u32;
+    for &i in order.iter().filter(|&&i| mix[i] > 0) {
+        let (from, to) = (acc as f32 / 1000.0 * len, (acc + mix[i] as u32) as f32 / 1000.0 * len);
+        acc += mix[i] as u32;
+        let strip = if horizontal {
+            egui::Rect::from_min_max(egui::pos2(rect.min.x + from, rect.min.y), egui::pos2(rect.min.x + to, rect.max.y))
+        } else {
+            egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.min.y + from), egui::pos2(rect.max.x, rect.min.y + to))
+        };
+        painter.rect_filled(strip, 0.0, tint(category_color(Category::ALL[i])));
+    }
+}
+
+/// "Code 60% - Images 30%": the biggest categories of a files block.
+fn mix_summary(mix: &Mix) -> String {
+    let mut order: Vec<usize> = (0..8).filter(|&i| mix[i] >= 50).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(mix[i]));
+    order.iter().take(3).map(|&i| format!("{} {}%", tr(Category::ALL[i].label()), (mix[i] as f32 / 10.0).round())).collect::<Vec<_>>().join(" - ")
 }
 
 pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected: &mut Option<NodeId>, docked: bool, style: &MapStyle) -> Option<ListEvent> {
@@ -158,7 +187,9 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
     let (resp, painter) = ui.allocate_painter(egui::vec2(avail.x, (avail.y - legend_h).max(40.0)), Sense::click());
     let area = resp.rect;
     painter.rect_filled(area, 0.0, ui.visuals().extreme_bg_color);
-    let opts = NestOpts { max_depth: style.levels, unique_files: style.unique_files, headers: style.headers, max_tiles: MAX_TILES, free_space: style.free_space };
+    // A live snapshot has no file nodes: files keep the plain tone (and the level legend) until the scan ends.
+    let by_type = style.by_type && tree.has_file_nodes();
+    let opts = NestOpts { max_depth: style.levels, unique_files: style.unique_files, headers: style.headers, max_tiles: MAX_TILES, free_space: style.free_space, by_type };
     let tiles = nested_with(tree, *root, TRect::new(0.0, 0.0, area.width(), area.height()), &opts);
     if tiles.is_empty() {
         painter.text(area.center(), egui::Align2::CENTER_CENTER, tr("Nothing to show"), egui::FontId::proportional(14.0), ui.visuals().text_color());
@@ -170,15 +201,18 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
     for (i, t) in tiles.iter().enumerate() {
         let rect = to_rect(t.rect);
         let base = LEVELS[(t.depth as usize).min(LEVELS.len() - 1)];
-        let mut fill = match t.kind {
+        let fill = match t.kind {
             TileKind::Folder => base,
             TileKind::File | TileKind::FilesBlock => super::theme::file_tile(base),
             TileKind::Free => super::theme::MAP_FREE,
         };
-        if hit == Some(i) {
-            fill = fill.gamma_multiply(1.35);
+        let hovered = hit == Some(i);
+        let tint = |c: Color32| if hovered { c.gamma_multiply(1.35) } else { c };
+        painter.rect_filled(rect.shrink(0.5), 0.0, tint(fill));
+        let mix = t.mix.filter(|_| by_type && matches!(t.kind, TileKind::File | TileKind::FilesBlock));
+        if let Some(mix) = &mix {
+            paint_mix(&painter, rect.shrink(0.5), mix, tint);
         }
-        painter.rect_filled(rect.shrink(0.5), 0.0, fill);
         let is_sel = matches!(t.kind, TileKind::Folder | TileKind::File) && *selected == Some(t.id);
         painter.rect_stroke(rect.shrink(0.5), 0.0, egui::Stroke::new(if is_sel { 2.0 } else { 1.0 }, if is_sel { super::theme::MAP_SELECTED } else { super::theme::MAP_BORDER }), egui::StrokeKind::Inside);
         if !style.labels {
@@ -194,7 +228,12 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
         };
         if let Some(label) = label {
             if t.rect.h > 13.0 && t.rect.w > 24.0 {
-                painter.with_clip_rect(rect).text(rect.min + egui::vec2(3.0, 1.0), egui::Align2::LEFT_TOP, label, font.clone(), Color32::WHITE);
+                let clipped = painter.with_clip_rect(rect);
+                if mix.is_some() {
+                    // Category colours can be light: a soft shadow keeps the caption readable.
+                    clipped.text(rect.min + egui::vec2(4.0, 2.0), egui::Align2::LEFT_TOP, &label, font.clone(), Color32::from_black_alpha(170));
+                }
+                clipped.text(rect.min + egui::vec2(3.0, 1.0), egui::Align2::LEFT_TOP, label, font.clone(), Color32::WHITE);
             }
         }
     }
@@ -225,7 +264,21 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
             _ => tree.path_of(t.id).display().to_string(),
         };
         let total = if style.free_space.is_some() { tree.get(*root).size + style.free_space.unwrap_or(0) } else { tree.get(*root).size }.max(1);
-        resp.clone().on_hover_text_at_pointer(format!("{}\n{} ({:.1}% {} {})", what, format_bytes(t.size), t.size as f64 * 100.0 / total as f64, tr("of"), tree.name(*root)));
+        let mut tip = format!("{}\n{} ({:.1}% {} {})", what, format_bytes(t.size), t.size as f64 * 100.0 / total as f64, tr("of"), tree.name(*root));
+        let detail = match t.kind {
+            TileKind::Folder => Some(format!("{} {} - {} {}", crate::fmt::group_int(n.files), tr("Files"), crate::fmt::group_int(n.dirs), tr("Folders"))),
+            TileKind::File => {
+                let category = tr(category_of_name(tree.name(t.id)).label());
+                Some(if n.modified != 0 { format!("{} - {}", category, format_time(n.modified)) } else { category })
+            }
+            TileKind::FilesBlock => t.mix.map(|m| mix_summary(&m)).filter(|s| !s.is_empty()),
+            TileKind::Free => None,
+        };
+        if let Some(d) = detail {
+            tip.push('\n');
+            tip.push_str(&d);
+        }
+        resp.clone().on_hover_text_at_pointer(tip);
         let drillable = t.kind == TileKind::Folder && n.is_dir && !tree.children(t.id).is_empty();
         if resp.double_clicked() && drillable && !docked {
             *root = t.id;
@@ -238,12 +291,24 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
     }
     if style.legend {
         let (lr, lp) = ui.allocate_painter(egui::vec2(avail.x, legend_h), Sense::hover());
-        let count = (style.levels as usize + 1).min(LEVELS.len());
-        let w = lr.rect.width() / count as f32;
-        for (i, c) in LEVELS.iter().take(count).enumerate() {
-            let r = egui::Rect::from_min_size(lr.rect.min + egui::vec2(w * i as f32 + 2.0, 3.0), egui::vec2(w - 4.0, legend_h - 6.0));
-            lp.rect_filled(r, 0.0, *c);
-            lp.text(r.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} {}", tr("Level"), i), font.clone(), Color32::WHITE);
+        if by_type {
+            // File categories (folders keep the level ramp, readable from their caption strips).
+            let w = lr.rect.width() / Category::ALL.len() as f32;
+            for (i, c) in Category::ALL.iter().enumerate() {
+                let r = egui::Rect::from_min_size(lr.rect.min + egui::vec2(w * i as f32 + 2.0, 3.0), egui::vec2(w - 4.0, legend_h - 6.0));
+                lp.rect_filled(r, 0.0, category_color(*c));
+                let (pos, al) = (r.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER);
+                lp.with_clip_rect(r).text(pos + egui::vec2(1.0, 1.0), al, tr(c.label()), font.clone(), Color32::from_black_alpha(170));
+                lp.with_clip_rect(r).text(pos, al, tr(c.label()), font.clone(), Color32::WHITE);
+            }
+        } else {
+            let count = (style.levels as usize + 1).min(LEVELS.len());
+            let w = lr.rect.width() / count as f32;
+            for (i, c) in LEVELS.iter().take(count).enumerate() {
+                let r = egui::Rect::from_min_size(lr.rect.min + egui::vec2(w * i as f32 + 2.0, 3.0), egui::vec2(w - 4.0, legend_h - 6.0));
+                lp.rect_filled(r, 0.0, *c);
+                lp.text(r.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} {}", tr("Level"), i), font.clone(), Color32::WHITE);
+            }
         }
     }
     event

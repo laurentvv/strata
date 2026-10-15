@@ -258,6 +258,15 @@ impl App {
                                 }
                             }
                         });
+                        let colors = big_button(ui, Icon::Types, &tr("Map colors"), self.settings.show_map, false);
+                        egui::Popup::menu(&colors).show(|ui| {
+                            for (by_type, label) in [(true, "By file type"), (false, "By folder level")] {
+                                if ui.selectable_label(self.settings.map_by_type == by_type, tr(label)).clicked() {
+                                    self.settings.map_by_type = by_type;
+                                    ui.close();
+                                }
+                            }
+                        });
                         ui.vertical(|ui| {
                             ui.checkbox(&mut self.settings.map_unique_files, tr("Show unique files"));
                             ui.checkbox(&mut self.settings.map_headers, tr("Show hierarchy"));
