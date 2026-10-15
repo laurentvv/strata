@@ -4,4 +4,5 @@ pub mod duplicates;
 pub mod filter;
 pub mod insights;
 pub mod snapshot;
+pub mod system_space;
 pub mod types;

@@ -52,7 +52,7 @@ Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
                                             headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders;
                                             --fast reads the NTFS Master File Table of a whole drive (administrator only)
        strata --version
-       strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--dialog options|about]
+       strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age|system] [--tab N] [--dialog options|about]
                       [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit
        strata --simulate-start-failure      developer flag: show the message of a window that cannot be created
        strata --simulate-no-opengl          developer flag: make the OpenGL set-up fail to test the DirectX fallback";

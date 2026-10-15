@@ -28,6 +28,8 @@ pub enum ViewKind {
     Compare,
     Cleanup,
     Age,
+    /// Windows' own big files and folders that are easy to overlook.
+    System,
 }
 
 /// Unit used to display sizes everywhere (tree, status bar, views, exports).
