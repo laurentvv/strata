@@ -376,7 +376,9 @@ pub fn chart_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId) {
     }
 }
 
-pub fn types_view(ui: &mut egui::Ui, stats: &[TypeStat]) {
+/// File-type table. A double-click on a row returns its extension (to filter the tree by it).
+pub fn types_view(ui: &mut egui::Ui, stats: &[TypeStat]) -> Option<String> {
+    let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         for c in Category::ALL {
             let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
@@ -384,9 +386,12 @@ pub fn types_view(ui: &mut egui::Ui, stats: &[TypeStat]) {
             ui.label(tr(c.label()));
         }
     });
+    // Selectable labels would swallow the double-click meant for the row.
+    ui.style_mut().interaction.selectable_labels = false;
     TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
+        .sense(Sense::click())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::initial(140.0).at_least(60.0))
         .column(Column::initial(110.0).at_least(60.0))
@@ -436,8 +441,15 @@ pub fn types_view(ui: &mut egui::Ui, stats: &[TypeStat]) {
                         ui.visuals().text_color(),
                     );
                 });
+                if !s.ext.is_empty() {
+                    let resp = row.response().on_hover_text(tr("Double-click to show only these files"));
+                    if resp.double_clicked() {
+                        picked = Some(s.ext.clone());
+                    }
+                }
             });
         });
+    picked
 }
 
 /// Ranked file list (largest / oldest). Click selects, double-click opens in Explorer.

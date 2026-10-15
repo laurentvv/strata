@@ -36,6 +36,7 @@ static FR: &[(&str, &str)] = &[
     ("Invalid name", "Nom invalide"),
     ("Last 30 days", "30 derniers jours"),
     ("Level", "Niveau"),
+    ("Double-click to show only these files", "Double-cliquez pour n'afficher que ces fichiers"),
     ("Map colors", "Couleurs de la carte"),
     ("By file type", "Par type de fichier"),
     ("By folder level", "Par niveau de dossier"),

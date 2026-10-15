@@ -2137,13 +2137,14 @@ impl App {
         let Some(l) = &self.loaded else { return };
         let tree = &l.tree;
         let mut ev = None;
+        let mut picked_ext = None;
         match self.view {
             ViewKind::Treemap => {
                 let style = self.map_style(self.view_root);
                 ev = views::treemap_view(ui, tree, &mut self.view_root, &mut self.selected, false, &style)
             }
             ViewKind::Chart => views::chart_view(ui, tree, &mut self.view_root),
-            ViewKind::Types => views::types_view(ui, self.types_cache.as_deref().unwrap_or(&[])),
+            ViewKind::Types => picked_ext = views::types_view(ui, self.types_cache.as_deref().unwrap_or(&[])),
             ViewKind::Largest => {
                 ev = views::file_list_view(ui, self.largest_cache.as_deref().unwrap_or(&[]), "largest", self.selected)
             }
@@ -2154,6 +2155,17 @@ impl App {
         }
         let ctx = ui.ctx().clone();
         self.list_event(&ctx, ev);
+        if let Some(ext) = picked_ext {
+            self.show_only_extension(&ext);
+        }
+    }
+
+    /// From the file-type table: keep only the files of one extension in the tree.
+    fn show_only_extension(&mut self, ext: &str) {
+        self.filter_in = FilterInputs { exts: ext.to_string(), ..FilterInputs::default() };
+        self.show_filters = true;
+        self.apply_filter_inputs();
+        self.view = ViewKind::Tree;
     }
 
     /// Handle what a ranked / clean-up list reported (selection, open, right-click menu).
