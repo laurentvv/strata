@@ -144,6 +144,8 @@ pub struct Settings {
     pub map_headers: bool,
     pub map_legend: bool,
     pub map_labels: bool,
+    /// Colour the files of the map by file category.
+    pub map_by_type: bool,
     /// Add the free space of the drive as a tile (when the map shows a drive root).
     pub map_free: bool,
     pub size_mode: SizeMode,
@@ -180,6 +182,7 @@ impl Default for Settings {
             map_headers: true,
             map_legend: true,
             map_labels: true,
+            map_by_type: true,
             map_free: false,
             size_mode: SizeMode::Allocated,
             theme: Theme::Auto,
@@ -264,6 +267,7 @@ mod tests {
             map_headers: false,
             map_legend: false,
             map_labels: false,
+            map_by_type: false,
             map_free: true,
             size_mode: SizeMode::Allocated,
             theme: Theme::Dark,

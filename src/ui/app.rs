@@ -2446,6 +2446,7 @@ impl App {
             headers: s.map_headers,
             legend: s.map_legend,
             labels: s.map_labels,
+            by_type: s.map_by_type,
             free_space: (s.map_free && drive_root).then(|| self.disk.as_ref().map(|d| d.free)).flatten(),
         }
     }

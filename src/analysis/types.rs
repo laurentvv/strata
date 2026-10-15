@@ -41,6 +41,11 @@ impl Category {
         }
     }
 
+    /// Position in `Category::ALL` (index into per-category arrays).
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
     pub fn rgb(self) -> [u8; 3] {
         match self {
             Category::Documents => [86, 140, 214],
@@ -48,7 +53,7 @@ impl Category {
             Category::Video => [200, 90, 90],
             Category::Audio => [170, 110, 200],
             Category::Archives => [214, 160, 70],
-            Category::Code => [70, 170, 180],
+            Category::Code => [222, 112, 168],
             Category::Executables => [220, 120, 60],
             Category::Other => [140, 140, 150],
         }
@@ -61,6 +66,23 @@ pub fn ext_of(name: &str) -> String {
         Some(i) if i > 0 && i + 1 < name.len() => name[i + 1..].to_ascii_lowercase(),
         _ => String::new(),
     }
+}
+
+/// Category of a file from its name, without allocating (the treemap calls this for every file).
+pub fn category_of_name(name: &str) -> Category {
+    let ext = match name.rfind('.') {
+        Some(i) if i > 0 && i + 1 < name.len() => &name[i + 1..],
+        _ => return Category::Other,
+    };
+    let mut buf = [0u8; 8];
+    if ext.len() > buf.len() {
+        return Category::Other;
+    }
+    for (d, s) in buf.iter_mut().zip(ext.bytes()) {
+        *d = s.to_ascii_lowercase();
+    }
+    // Only ASCII bytes were changed, so the buffer is still valid UTF-8.
+    category_of(std::str::from_utf8(&buf[..ext.len()]).unwrap_or(""))
 }
 
 pub fn category_of(ext: &str) -> Category {
@@ -252,6 +274,16 @@ pub mod testutil {
 mod tests {
     use super::testutil::tree_of;
     use super::*;
+
+    #[test]
+    fn category_by_name_matches_category_of_ext_without_allocating() {
+        for name in ["a.RS", "b.Mp4", "c.PNG", "d.tar.gz", "e.dll", "f.unknownext", ".hidden", "noext", "g.", "h.verylongextension", "é.jpg", "x.ÉÉ"] {
+            assert_eq!(category_of_name(name), category_of(&ext_of(name)), "{name}");
+        }
+        assert_eq!(category_of_name("report.PDF"), Category::Documents);
+        assert_eq!(category_of_name("noext"), Category::Other);
+        assert!(Category::ALL.iter().enumerate().all(|(i, c)| c.index() == i));
+    }
 
     fn sample() -> Tree {
         tree_of(&[

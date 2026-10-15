@@ -1,5 +1,6 @@
 //! Pure layout maths for the treemap (squarified, nested) and the pie chart. No egui types.
 
+use crate::analysis::types::category_of_name;
 use crate::scan::{NodeId, Tree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -120,6 +121,29 @@ const PAD: f32 = 2.0;
 /// Individual files drawn per folder in "unique files" mode (the rest is one block).
 const MAX_FILE_TILES: usize = 120;
 
+/// Share of each file category in a tile, in thousandths, indexed like `Category::ALL`.
+pub type Mix = [u16; 8];
+
+/// Category mix of the given files by size (`None` when they hold no bytes).
+fn mix_of(tree: &Tree, files: impl Iterator<Item = NodeId>) -> Option<Mix> {
+    let mut by_cat = [0u64; 8];
+    for f in files {
+        by_cat[category_of_name(tree.name(f)).index()] += tree.get(f).size;
+    }
+    let total: u64 = by_cat.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let mut mix = [0u16; 8];
+    for (m, &b) in mix.iter_mut().zip(&by_cat) {
+        *m = (b as u128 * 1000 / total as u128) as u16;
+    }
+    // Rounding down loses up to 7 thousandths: give them to the biggest category.
+    let big = by_cat.iter().enumerate().max_by_key(|(_, &b)| b).map_or(0, |(i, _)| i);
+    mix[big] += 1000 - mix.iter().sum::<u16>();
+    Some(mix)
+}
+
 /// What a tile stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileKind {
@@ -147,6 +171,9 @@ pub struct Tile {
     pub files: u64,
     /// Children are laid out inside this tile (below a caption strip when `headers` is on).
     pub has_header: bool,
+    /// File categories of a file / files-block tile (only when `NestOpts::by_type` and the tree
+    /// holds file nodes).
+    pub mix: Option<Mix>,
 }
 
 /// Layout options of the nested treemap.
@@ -161,11 +188,13 @@ pub struct NestOpts {
     pub max_tiles: usize,
     /// Free bytes of the drive: adds a "free space" tile at the first level.
     pub free_space: Option<u64>,
+    /// Work out the category mix of file tiles (colour by file type).
+    pub by_type: bool,
 }
 
 impl Default for NestOpts {
     fn default() -> Self {
-        NestOpts { max_depth: 3, unique_files: false, headers: true, max_tiles: 4000, free_space: None }
+        NestOpts { max_depth: 3, unique_files: false, headers: true, max_tiles: 4000, free_space: None, by_type: false }
     }
 }
 
@@ -189,7 +218,7 @@ pub fn nested_with(tree: &Tree, root: NodeId, area: Rect, opts: &NestOpts) -> Ve
 enum Item {
     Folder(NodeId),
     File(NodeId),
-    Block { dir: NodeId, size: u64, files: u64 },
+    Block { dir: NodeId, size: u64, files: u64, mix: Option<Mix> },
     Free(u64),
 }
 
@@ -198,7 +227,7 @@ fn place_dir(tree: &Tree, id: NodeId, rect: Rect, depth: u8, opts: &NestOpts, ou
     let head = if opts.headers { HEADER_H } else { 0.0 };
     let wants_children = depth < opts.max_depth && node.is_dir && !tree.children(id).is_empty();
     let can_nest = wants_children && rect.w > 36.0 && rect.h > head + 14.0;
-    out.push(Tile { id, rect, depth, kind: TileKind::Folder, size: node.size, files: node.files, has_header: can_nest });
+    out.push(Tile { id, rect, depth, kind: TileKind::Folder, size: node.size, files: node.files, has_header: can_nest, mix: None });
     if !can_nest {
         return;
     }
@@ -213,10 +242,12 @@ fn place_dir(tree: &Tree, id: NodeId, rect: Rect, depth: u8, opts: &NestOpts, ou
         items.extend(files.into_iter().map(|f| (Item::File(f), tree.get(f).size)));
         let rest_size: u64 = rest.iter().map(|&f| tree.get(f).size).sum();
         if rest_size > 0 {
-            items.push((Item::Block { dir: id, size: rest_size, files: rest.len() as u64 }, rest_size));
+            let mix = if opts.by_type { mix_of(tree, rest.iter().copied()) } else { None };
+            items.push((Item::Block { dir: id, size: rest_size, files: rest.len() as u64, mix }, rest_size));
         }
     } else if direct.size > 0 {
-        items.push((Item::Block { dir: id, size: direct.size, files: direct.count }, direct.size));
+        let mix = if opts.by_type && tree.has_file_nodes() { mix_of(tree, tree.children(id).iter().copied().filter(|&c| !tree.get(c).is_dir)) } else { None };
+        items.push((Item::Block { dir: id, size: direct.size, files: direct.count, mix }, direct.size));
     }
     if depth == 0 {
         if let Some(free) = opts.free_space.filter(|&f| f > 0) {
@@ -233,9 +264,16 @@ fn place_dir(tree: &Tree, id: NodeId, rect: Rect, depth: u8, opts: &NestOpts, ou
         }
         match item {
             Item::Folder(c) => place_dir(tree, *c, r, depth + 1, opts, out),
-            Item::File(f) => out.push(Tile { id: *f, rect: r, depth: depth + 1, kind: TileKind::File, size: *size, files: 1, has_header: false }),
-            Item::Block { dir, size, files } => out.push(Tile { id: *dir, rect: r, depth: depth + 1, kind: TileKind::FilesBlock, size: *size, files: *files, has_header: false }),
-            Item::Free(f) => out.push(Tile { id, rect: r, depth: depth + 1, kind: TileKind::Free, size: *f, files: 0, has_header: false }),
+            Item::File(f) => {
+                let mix = opts.by_type.then(|| {
+                    let mut m = [0u16; 8];
+                    m[category_of_name(tree.name(*f)).index()] = 1000;
+                    m
+                });
+                out.push(Tile { id: *f, rect: r, depth: depth + 1, kind: TileKind::File, size: *size, files: 1, has_header: false, mix })
+            }
+            Item::Block { dir, size, files, mix } => out.push(Tile { id: *dir, rect: r, depth: depth + 1, kind: TileKind::FilesBlock, size: *size, files: *files, has_header: false, mix: *mix }),
+            Item::Free(f) => out.push(Tile { id, rect: r, depth: depth + 1, kind: TileKind::Free, size: *f, files: 0, has_header: false, mix: None }),
         }
     }
 }
@@ -321,6 +359,45 @@ mod tests {
         let tiles = nested_with(&tree, Tree::ROOT, area, &o);
         let child = tiles.iter().find(|t| t.depth == 1).unwrap();
         assert!(child.rect.y < HEADER_H, "no caption strip reserved: {}", child.rect.y);
+    }
+
+    #[test]
+    fn tiles_carry_the_file_category_mix_only_when_asked() {
+        use crate::analysis::types::Category;
+        let d = tempfile::tempdir().unwrap();
+        for (p, n) in [("a/main.RS", 6000), ("a/pic.png", 3000), ("a/lib.dll", 1000), ("b/doc.txt", 500)] {
+            let path = d.path().join(p);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; n]).unwrap();
+        }
+        let tree = crate::scan::scan_simple(d.path()).tree;
+        let area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let block_of = |tiles: &[Tile], dir: &str| tiles.iter().find(|t| t.kind == TileKind::FilesBlock && tree.name(t.id) == dir).copied().unwrap();
+
+        // Off by default: no mix anywhere.
+        let tiles = nested_with(&tree, Tree::ROOT, area, &NestOpts::default());
+        assert!(tiles.iter().all(|t| t.mix.is_none()));
+
+        // Aggregated block: shares by size, summing to exactly 1000.
+        let o = NestOpts { by_type: true, ..NestOpts::default() };
+        let tiles = nested_with(&tree, Tree::ROOT, area, &o);
+        let m = block_of(&tiles, "a").mix.expect("mix of folder a");
+        assert_eq!((m[Category::Code.index()], m[Category::Images.index()], m[Category::Executables.index()]), (600, 300, 100));
+        assert_eq!(m.iter().map(|&x| x as u32).sum::<u32>(), 1000);
+        assert_eq!(block_of(&tiles, "b").mix.unwrap()[Category::Documents.index()], 1000);
+        assert!(tiles.iter().filter(|t| t.kind == TileKind::Folder).all(|t| t.mix.is_none()));
+
+        // Unique files: each file tile is a single category (case-insensitive extension).
+        let o = NestOpts { by_type: true, unique_files: true, ..NestOpts::default() };
+        let tiles = nested_with(&tree, Tree::ROOT, area, &o);
+        let main = tiles.iter().find(|t| t.kind == TileKind::File && tree.name(t.id) == "main.RS").unwrap();
+        assert_eq!(main.mix.unwrap()[Category::Code.index()], 1000);
+
+        // A live snapshot has no file nodes: no mix, the map falls back to the plain file colour.
+        let mut live = tree.clone();
+        live.live = Some(Box::default());
+        let tiles = nested_with(&live, Tree::ROOT, area, &NestOpts { by_type: true, ..NestOpts::default() });
+        assert!(tiles.iter().all(|t| t.mix.is_none()));
     }
 
     #[test]
