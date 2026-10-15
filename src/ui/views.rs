@@ -264,14 +264,25 @@ pub fn chart_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId) {
     let centre = area.min + egui::vec2(radius + 16.0, radius + 16.0);
     let angles = pie_angles(&slices.iter().map(|s| s.size).collect::<Vec<_>>());
     for (i, (a, b)) in angles.iter().enumerate() {
-        let steps = (((b - a) / 0.05).ceil() as usize).max(1);
-        for k in 0..steps {
-            let a0 = a + (b - a) * k as f32 / steps as f32;
-            let a1 = a + (b - a) * (k + 1) as f32 / steps as f32;
-            let p = |ang: f32| centre + egui::vec2(ang.cos(), ang.sin()) * radius;
-            painter.add(egui::Shape::convex_polygon(vec![centre, p(a0), p(a1)], palette(i), egui::Stroke::NONE));
+        if b <= a {
+            continue;
         }
+        // One mesh per slice: separate anti-aliased triangles would leave a visible seam between them.
+        let steps = (((b - a) / 0.05).ceil() as usize).max(1);
+        let col = palette(i);
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(centre, col);
+        for k in 0..=steps {
+            let ang = a + (b - a) * k as f32 / steps as f32;
+            mesh.colored_vertex(centre + egui::vec2(ang.cos(), ang.sin()) * radius, col);
+        }
+        for k in 0..steps as u32 {
+            mesh.add_triangle(0, k + 1, k + 2);
+        }
+        painter.add(egui::Shape::mesh(mesh));
     }
+    // Mesh edges are not anti-aliased: a thin ring in the panel colour smooths the outline.
+    painter.circle_stroke(centre, radius, egui::Stroke::new(1.5, ui.visuals().panel_fill));
     // Bars on the right.
     let bx = centre.x + radius + 32.0;
     let bar_w = (area.max.x - bx - 12.0).max(80.0);
