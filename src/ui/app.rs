@@ -13,7 +13,7 @@ use crate::analysis::filter::{self, Filter};
 use crate::analysis::insights::{self, AgeBucket};
 use crate::analysis::snapshot::{self, DirDelta, Snapshot};
 use crate::analysis::types::{self, TypeStat};
-use crate::spec::{self, Item};
+use crate::spec;
 use crate::export;
 use crate::fmt;
 use crate::i18n::{self, tr};
@@ -401,18 +401,21 @@ pub struct App {
     delete_error: Option<String>,
     show_errors: bool,
     status: String,
-    menu_items: Vec<Item>,
     shortcuts: Vec<(egui::KeyboardShortcut, Cmd)>,
     show_options: bool,
     show_about: bool,
     about_icon: Option<egui::TextureHandle>,
     exclude_input: String,
+    /// The excluded-folders list changed since the last scan.
+    excludes_changed: bool,
     lang_applied: String,
     dark_applied: Option<bool>,
     persist_enabled: bool,
     win_geom: Option<WindowGeom>,
     win_changed: Instant,
     shot: Option<ShotState>,
+    /// `--dialog` of the screenshot mode.
+    shot_dialog: Option<String>,
 }
 
 /// State of the `--screenshot` developer mode.
@@ -437,6 +440,8 @@ pub struct RunOptions {
     pub lang: Option<String>,
     /// Ribbon tab to show (0 = File ... 5 = Help), for screenshots.
     pub tab: Option<usize>,
+    /// Dialog to open before the screenshot: "options" or "about".
+    pub dialog: Option<String>,
 }
 
 pub fn parse_view(name: &str) -> Option<ViewKind> {
@@ -471,6 +476,7 @@ pub fn parse_args(args: &[String]) -> Result<RunOptions, String> {
                 o.view = Some(parse_view(v).ok_or_else(|| format!("unknown view '{v}'"))?);
             }
             "--lang" => o.lang = Some(it.next().ok_or("--lang needs a code")?.clone()),
+            "--dialog" => o.dialog = Some(it.next().ok_or("--dialog needs options or about")?.clone()),
             "--tab" => o.tab = Some(it.next().ok_or("--tab needs a number 0-5")?.parse().map_err(|_| "--tab needs a number 0-5")?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             s => o.start = Some(PathBuf::from(s)),
@@ -596,7 +602,6 @@ impl App {
         };
         let first = drives.first().cloned().unwrap_or_default();
         let settings_path = if opts.screenshot.is_some() { None } else { settings::default_path() };
-        let menu_items = spec::menu_items();
         let shortcuts = spec::shortcuts();
         let mut st = st;
         if let Some(l) = &opts.lang {
@@ -612,6 +617,8 @@ impl App {
         let system_dark = settings::system_dark();
         let dark = st.theme.is_dark(system_dark);
         ctx.set_visuals(visuals_for(dark));
+        // Labels are not selectable: hovering them must not show the text-selection cursor.
+        ctx.all_styles_mut(|style| style.interaction.selectable_labels = false);
         let view = opts.view.unwrap_or(st.view);
         Self {
             path_text: if st.last_path.is_empty() { first } else { st.last_path.clone() },
@@ -684,12 +691,12 @@ impl App {
             delete_error: None,
             show_errors: false,
             status: tr("Ready"),
-            menu_items,
             shortcuts,
             show_options: false,
             show_about: false,
             about_icon: None,
             exclude_input: String::new(),
+            excludes_changed: false,
             persist_enabled: opts.screenshot.is_none(),
             win_geom: None,
             win_changed: Instant::now(),
@@ -701,6 +708,7 @@ impl App {
                 started: Instant::now(),
                 live: opts.live,
             }),
+            shot_dialog: opts.dialog.clone(),
         }
     }
 
@@ -720,6 +728,7 @@ impl App {
         }
         self.status = format!("{} {} ...", tr("Scanning"), root.display());
         self.notice.clear();
+        self.excludes_changed = false;
         self.settings.last_path = root.to_string_lossy().into_owned();
         settings::push_recent(&mut self.settings.recent, &self.settings.last_path.clone(), 10);
         self.partial_seen = false;
@@ -1168,6 +1177,7 @@ impl App {
                 Action::NewFolder(id) => self.name_dialog = Some(NameDialog { id, new_folder: true, text: String::new(), err: String::new(), focused: false }),
                 Action::Exclude(id) => {
                     if let Some(l) = &mut self.loaded {
+                        self.notice = format!("{}: {} - {}", tr("Excluded"), l.tree.name(id), tr("bring it back in Options > Excluded folders"));
                         self.excludes.push(l.tree.path_of(id));
                         l.tree.remove_subtree(id);
                         self.selected = None;
@@ -1179,16 +1189,39 @@ impl App {
         }
     }
 
-    fn item_label(item: &Item) -> String {
-        tr(item.caption)
+    /// "Parent Folder" inside the results: the map and chart show the parent of the folder they
+    /// display, the tree selects the parent of the selected item. `false` when there is nothing to
+    /// go up to (the command then scans the folder above the scanned one).
+    fn go_up_in_results(&mut self) -> bool {
+        let Some(l) = &self.loaded else { return false };
+        match self.view {
+            ViewKind::Treemap | ViewKind::Chart if self.view_root != Tree::ROOT => {
+                let p = l.tree.get(self.view_root).parent;
+                self.view_root = if p == NONE { Tree::ROOT } else { p };
+                true
+            }
+            ViewKind::Tree => match self.selected.map(|s| l.tree.get(s).parent) {
+                Some(p) if p != NONE && self.selected != Some(Tree::ROOT) => {
+                    self.reveal_in_tree(p);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
-    fn item_hint(item: &Item) -> String {
-        if item.hint.is_empty() {
-            String::new()
-        } else {
-            tr(item.hint)
+    /// Is "Parent Folder" meaningful now: something to go up to in the results, or a folder above the scanned one?
+    fn can_go_up(&self) -> bool {
+        if self.handle.is_some() {
+            return false;
         }
+        let in_results = self.loaded.as_ref().is_some_and(|l| match self.view {
+            ViewKind::Treemap | ViewKind::Chart => self.view_root != Tree::ROOT,
+            ViewKind::Tree => self.selected.is_some_and(|s| s != Tree::ROOT && l.tree.get(s).parent != NONE),
+            _ => false,
+        });
+        in_results || std::path::Path::new(self.path_text.trim()).parent().is_some_and(|p| !p.as_os_str().is_empty())
     }
 
     fn cmd_enabled(&self, cmd: Cmd) -> bool {
@@ -1196,7 +1229,8 @@ impl App {
         let loaded = self.loaded.is_some();
         match cmd {
             Cmd::Stop => scanning,
-            Cmd::Refresh | Cmd::ParentFolder | Cmd::ScanDir => !scanning,
+            Cmd::ParentFolder => self.can_go_up(),
+            Cmd::Refresh | Cmd::ScanDir => !scanning,
             Cmd::RescanSelected => {
                 let is_dir = |s: NodeId| self.loaded.as_ref().is_some_and(|l| l.tree.get(s).is_dir && !l.tree.get(s).is_link);
                 !scanning && self.sub_scan.is_none() && self.selected.is_some_and(is_dir)
@@ -1230,12 +1264,8 @@ impl App {
     fn run_cmd(&mut self, ctx: &egui::Context, cmd: Cmd) {
         match cmd {
             Cmd::ParentFolder => {
-                if matches!(self.view, ViewKind::Treemap | ViewKind::Chart) && self.view_root != Tree::ROOT {
-                    if let Some(l) = &self.loaded {
-                        let p = l.tree.get(self.view_root).parent;
-                        self.view_root = if p == NONE { Tree::ROOT } else { p };
-                        return;
-                    }
+                if self.go_up_in_results() {
+                    return;
                 }
                 if self.handle.is_none() {
                     let cur = PathBuf::from(self.path_text.trim());
@@ -1339,37 +1369,6 @@ impl App {
         }
     }
 
-    fn draw_menu_items(&self, ui: &mut egui::Ui, items: &[Item], out: &mut Option<Cmd>) {
-        for it in items {
-            if it.separator {
-                ui.separator();
-            } else if !it.children.is_empty() {
-                ui.menu_button(Self::item_label(it), |ui| self.draw_menu_items(ui, &it.children, out));
-            } else if let Some(cmd) = it.cmd {
-                let mut b = egui::Button::new(Self::item_label(it)).selected(self.cmd_checked(cmd));
-                if let Some(sc) = &it.shortcut {
-                    b = b.shortcut_text(spec::shortcut_text(sc));
-                }
-                let mut r = ui.add_enabled(self.cmd_enabled(cmd), b);
-                let hint = Self::item_hint(it);
-                if !hint.is_empty() {
-                    r = r.on_hover_text(hint);
-                }
-                if r.clicked() {
-                    *out = Some(cmd);
-                    ui.close();
-                }
-            }
-        }
-    }
-
-    /// Top menu bar built from the menu table in `spec.rs`.
-    fn menu_bar(&mut self, ui: &mut egui::Ui) -> Option<Cmd> {
-        let mut out = None;
-        egui::MenuBar::new().ui(ui, |ui| self.draw_menu_items(ui, &self.menu_items, &mut out));
-        out
-    }
-
     fn path_row(&mut self, ui: &mut egui::Ui) {
         let scanning = self.handle.is_some();
         ui.horizontal(|ui| {
@@ -1469,8 +1468,10 @@ impl App {
                 });
                 if !self.excludes.is_empty() {
                     let n = self.excludes.len();
-                    cell(ui, 90.0, |ui| {
-                        ui.add(egui::Label::new(format!("{} {}", n, tr("Excluded"))).truncate());
+                    cell(ui, 110.0, |ui| {
+                        if ui.link(format!("{} {}", n, tr("Excluded"))).on_hover_text(tr("Show the excluded folders (Options)")).clicked() {
+                            self.show_options = true;
+                        }
                     });
                 }
                 cell(ui, 110.0, |ui| {
@@ -2416,13 +2417,22 @@ impl App {
             self.dup_min = "1".into();
             self.start_duplicates();
         }
+        if ready {
+            match self.shot_dialog.as_deref() {
+                Some("options") => self.show_options = true,
+                Some("about") => self.show_about = true,
+                _ => {}
+            }
+        }
+        // A dialog fades in over a few tenths of a second: let it finish before the capture.
+        let frames_needed = if self.shot_dialog.is_some() { 40 } else { 8 };
         let Some(shot) = self.shot.as_mut() else { return };
         if !ready {
             return;
         }
         shot.prepared = true;
         shot.settle += 1;
-        if shot.settle == 8 && !shot.requested {
+        if shot.settle == frames_needed && !shot.requested {
             shot.requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }

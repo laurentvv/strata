@@ -9,7 +9,7 @@ fn cap(_id: &str, english: &str) -> String {
 }
 
 /// Split a button caption on a space so that it fits in two centred lines.
-fn split_caption(ui: &egui::Ui, text: &str, font: &egui::FontId, max_w: f32) -> Vec<String> {
+pub(super) fn split_caption(ui: &egui::Ui, text: &str, font: &egui::FontId, max_w: f32) -> Vec<String> {
     let width = |t: &str| ui.painter().layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x;
     if width(text) <= max_w {
         return vec![text.to_string()];
@@ -25,26 +25,100 @@ fn split_caption(ui: &egui::Ui, text: &str, font: &egui::FontId, max_w: f32) -> 
     }
     match best {
         Some((_, i)) => vec![text[..i].to_string(), text[i + 1..].to_string()],
+        // A single long word is never cut in the middle: the button gets wider instead.
+        None => vec![text.to_string()],
+    }
+}
+
+/// One-sentence explanation shown when hovering a ribbon button, keyed by its English caption
+/// (accelerator marks removed). Every value has a French entry (a test checks it).
+pub(super) const HINTS: &[(&str, &str)] = &[
+    ("Select Directory", "Choose the folder or drive to analyze (Ctrl+O)."),
+    ("Recent folders", "Scan again one of the folders analyzed recently."),
+    ("Stop Scan", "Stop the running scan and keep what was found."),
+    ("Refresh", "Scan the current folder again (F5)."),
+    ("New window", "Open another Strata window (Ctrl+Shift+N)."),
+    ("Exit", "Close Strata."),
+    ("Size", "Sort by the size of files and folders (Ctrl+1)."),
+    ("Allocated Space", "Sort by the space really used on disk (Ctrl+2)."),
+    ("File Count", "Sort by the number of files (Ctrl+4)."),
+    ("Percent", "Sort by the share each item takes of its parent (Ctrl+3)."),
+    ("Automatic Units", "Pick the unit (KB, MB, GB...) that fits each size."),
+    ("Parent Folder", "Go up one level: select the parent of the selected folder (in the map and chart: show the parent). At the top of the tree, scan the folder above (Alt+Up)."),
+    ("Open Location", "Show the selected item in Windows Explorer."),
+    ("Exclude", "Hide the selected folder from the results. It is listed under Options > Excluded folders, where you can bring it back (Ctrl+Shift+X)."),
+    ("Rescan Folder", "Scan only the selected folder again and update its totals."),
+    ("Expand", "Open the tree down to a chosen level."),
+    ("New folder", "Create a folder inside the selected folder."),
+    ("Restart as Administrator", "Relaunch Strata with administrator rights to read protected folders."),
+    ("Export", "Save the results as CSV, HTML or JSON."),
+    ("Tree", "Folders and files as an expandable table."),
+    ("Treemap", "Full-size proportional map of the selected folder."),
+    ("Chart", "Pie chart of the biggest items of the selected folder."),
+    ("File types", "Space used by each file extension and category."),
+    ("Top 100 files", "The 100 biggest files."),
+    ("Oldest files", "The files that were not modified for the longest time."),
+    ("Duplicates", "Find identical files and see what deleting the extra copies would free."),
+    ("Clean-up", "Folders that can usually be deleted safely (build output, caches...) and empty folders."),
+    ("File age", "How much space was last modified in each age range."),
+    ("Filter", "Show only files matching a name, size, date or type."),
+    ("Clear filter", "Remove the filter and show everything again."),
+    ("Hide empty folders", "Do not list folders that hold no data."),
+    ("Find in tree", "Jump to the next item whose name contains some text (Ctrl+F)."),
+    ("Changes", "What grew or vanished since an earlier scan of this folder."),
+    ("Compare...", "Compare with a snapshot file saved earlier."),
+    ("Snapshot...", "Save the current results as a snapshot file."),
+    ("Fast NTFS (admin)", "Read the NTFS file table directly: much faster on a whole drive, needs administrator rights."),
+    ("Show Details", "Show the Files, Folders and Last Modified columns."),
+    ("Configure columns", "Choose which columns the tree shows."),
+    ("Decimals", "Number of decimals in sizes."),
+    ("Proportional map", "Show or hide the map under or beside the tree."),
+    ("Expand all", "Open every folder of the tree (Ctrl+E)."),
+    ("Map at the bottom", "Dock the map under the tree."),
+    ("Map on the right", "Dock the map beside the tree."),
+    ("Level of detail", "How many folder levels the map draws."),
+    ("Map colors", "Colour files by type or by folder level."),
+    ("Level 1", "Open the tree down to level 1."),
+    ("Level 2", "Open the tree down to level 2."),
+    ("Level 3", "Open the tree down to level 3."),
+    ("Language", "Change the language of Strata."),
+    ("Style", "Light or dark appearance."),
+    ("Options", "All settings, including the excluded folders."),
+    ("About", "Version and information about Strata."),
+];
+
+/// Hover text of the ribbon button with this English caption (empty when unknown).
+fn hint_for(english: &str) -> String {
+    let key = crate::i18n::strip_accel(english);
+    match HINTS.iter().find(|(k, _)| *k == key) {
+        Some((_, h)) => tr(h),
         None => {
-            // No space to break at (CJK, long single words): split between characters.
-            let mut cut: Option<(f32, usize)> = None;
-            for (i, _) in text.char_indices().skip(1) {
-                let w = width(&text[..i]).max(width(&text[i..]));
-                if cut.is_none_or(|(bw, _)| w < bw) {
-                    cut = Some((w, i));
-                }
-            }
-            match cut {
-                Some((_, i)) => vec![text[..i].to_string(), text[i..].to_string()],
-                None => vec![text.to_string()],
-            }
+            #[cfg(test)]
+            MISSING_HINTS.with(|m| m.borrow_mut().push(key));
+            String::new()
         }
     }
 }
 
-/// Big icon button with a caption underneath.
-fn big_button(ui: &mut egui::Ui, ic: Icon, label: &str, enabled: bool, checked: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(68.0, 64.0), if enabled { Sense::click() } else { Sense::hover() });
+#[cfg(test)]
+thread_local! {
+    /// Captions drawn without an explanation (filled while the UI tests draw every ribbon tab).
+    pub(super) static MISSING_HINTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const CAPTION_FONT: f32 = 11.0;
+const MIN_BUTTON_W: f32 = 58.0;
+
+/// Big icon button with a caption underneath. `caption` is the English text: it is translated here
+/// and also selects the hover explanation. The button is as wide as its widest caption line.
+fn big_button(ui: &mut egui::Ui, ic: Icon, caption: &str, enabled: bool, checked: bool) -> egui::Response {
+    let label = tr(caption);
+    let font = egui::FontId::proportional(CAPTION_FONT);
+    let lines = split_caption(ui, &label, &font, MIN_BUTTON_W - 2.0);
+    let text_w = lines.iter().map(|l| ui.painter().layout_no_wrap(l.clone(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2((text_w + 10.0).max(MIN_BUTTON_W), 64.0), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = resp.on_hover_text(hint_for(caption));
+    let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     let vis = ui.visuals();
     if checked {
         ui.painter().rect_filled(rect, 2.0, vis.selection.bg_fill);
@@ -53,9 +127,8 @@ fn big_button(ui: &mut egui::Ui, ic: Icon, label: &str, enabled: bool, checked: 
     }
     let col = if enabled { vis.text_color() } else { vis.weak_text_color() };
     paint::icon(ui.painter(), egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 19.0), egui::vec2(28.0, 28.0)), ic, enabled);
-    let font = egui::FontId::proportional(11.5);
-    for (i, line) in split_caption(ui, label, &font, rect.width() - 2.0).iter().take(2).enumerate() {
-        ui.painter().with_clip_rect(rect).text(egui::pos2(rect.center().x, rect.top() + 37.0 + i as f32 * 12.5), egui::Align2::CENTER_TOP, line, font.clone(), col);
+    for (i, line) in lines.iter().take(2).enumerate() {
+        ui.painter().text(egui::pos2(rect.center().x, rect.top() + 37.0 + i as f32 * 12.5), egui::Align2::CENTER_TOP, line, font.clone(), col);
     }
     resp
 }
@@ -76,18 +149,9 @@ fn group(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
 }
 
 impl App {
-    /// Caption of a ribbon button (translated).
-    fn cmd_label(&self, _cmd: Cmd, fallback: &str) -> String {
-        tr(fallback)
-    }
-
-    fn big(&self, ui: &mut egui::Ui, out: &mut Option<Cmd>, cmd: Cmd, ic: Icon, fallback: &str) {
-        let label = self.cmd_label(cmd, fallback);
-        self.big_labeled(ui, out, cmd, ic, &label);
-    }
-
-    fn big_labeled(&self, ui: &mut egui::Ui, out: &mut Option<Cmd>, cmd: Cmd, ic: Icon, label: &str) {
-        if big_button(ui, ic, label, self.cmd_enabled(cmd), self.cmd_checked(cmd)).clicked() {
+    /// Ribbon button for a command; `caption` is the English text (translated by `big_button`).
+    fn big(&self, ui: &mut egui::Ui, out: &mut Option<Cmd>, cmd: Cmd, ic: Icon, caption: &str) {
+        if big_button(ui, ic, caption, self.cmd_enabled(cmd), self.cmd_checked(cmd)).clicked() {
             *out = Some(cmd);
         }
     }
@@ -108,7 +172,7 @@ impl App {
             for (i, n) in names.iter().enumerate() {
                 let active = self.ribbon_tab == i;
                 let text = if i == 0 { RichText::new(n).color(Color32::WHITE) } else { RichText::new(n) };
-                let resp = ui.add(egui::Label::new(text).sense(Sense::click()));
+                let resp = ui.add(egui::Label::new(text).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
                 let r = resp.rect.expand2(egui::vec2(8.0, 3.0));
                 if i == 0 {
                     ui.painter().rect_filled(r, 0.0, accent);
@@ -129,14 +193,40 @@ impl App {
         egui::ScrollArea::horizontal().id_salt("ribbon_scroll").auto_shrink([false, true]).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.set_min_height(88.0);
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 2.0;
             match self.ribbon_tab {
                 0 => {
-                    out = out.or(self.menu_bar(ui));
+                    group(ui, &tr("Scan"), |ui| {
+                        self.big(ui, &mut out, Cmd::ScanDir, Icon::Folder, "Select &Directory");
+                        let resp = big_button(ui, Icon::Open, "Recent folders", !scanning, false);
+                        egui::Popup::menu(&resp).show(|ui| {
+                            let recent = self.settings.recent.clone();
+                            if recent.is_empty() {
+                                ui.weak(tr("(none)"));
+                            }
+                            for r in recent {
+                                if ui.button(&r).clicked() {
+                                    self.path_text = r;
+                                    self.start_scan();
+                                    ui.close();
+                                }
+                            }
+                        });
+                        self.big(ui, &mut out, Cmd::Refresh, Icon::Refresh, "Refresh");
+                        self.big(ui, &mut out, Cmd::Stop, Icon::Stop, "Stop Scan");
+                    });
+                    group(ui, &tr("Window"), |ui| {
+                        self.big(ui, &mut out, Cmd::NewInstance, Icon::Files, "New window");
+                        self.big(ui, &mut out, Cmd::Exit, Icon::Exclude, "Exit");
+                    });
+                    group(ui, &tr("Application"), |ui| {
+                        self.big(ui, &mut out, Cmd::Options, Icon::Options, "Options");
+                        self.big(ui, &mut out, Cmd::About, Icon::About, "About");
+                    });
                 }
                 1 => {
                     group(ui, &cap("ScanTabTitleAction", "&Scan"), |ui| {
-                        self.big_labeled(ui, &mut out, Cmd::ScanDir, Icon::Folder, &cap("ScanListRibbonCollectionAction", "Select &Directory"));
+                        self.big(ui, &mut out, Cmd::ScanDir, Icon::Folder, "Select &Directory");
                         self.big(ui, &mut out, Cmd::Stop, Icon::Stop, "Stop Scan");
                         self.big(ui, &mut out, Cmd::Refresh, Icon::Refresh, "Refresh");
                     });
@@ -161,7 +251,7 @@ impl App {
                         self.big(ui, &mut out, Cmd::OpenLocation, Icon::Open, "Open Location");
                         self.big(ui, &mut out, Cmd::ExcludeSelected, Icon::Exclude, "Exclude");
                         self.big(ui, &mut out, Cmd::RescanSelected, Icon::Refresh, "Rescan Folder");
-                        let resp = big_button(ui, Icon::Expand, &tr("Expand"), self.loaded.is_some(), false);
+                        let resp = big_button(ui, Icon::Expand, "Expand", self.loaded.is_some(), false);
                         egui::Popup::menu(&resp).show(|ui| {
                             for n in 1..=3u8 {
                                 if ui.button(format!("{} {n}", tr("Level"))).clicked() {
@@ -178,7 +268,7 @@ impl App {
                     });
                     group(ui, &cap("GrpToolsTitleAction", "Tools"), |ui| {
                         self.big(ui, &mut out, Cmd::RestartAdmin, Icon::Bolt, "Restart as Administrator");
-                        let resp = big_button(ui, Icon::Export, &tr("Export"), self.loaded.is_some() && !scanning, false);
+                        let resp = big_button(ui, Icon::Export, "Export", self.loaded.is_some() && !scanning, false);
                         egui::Popup::menu(&resp).show(|ui| {
                             for (label, fmt) in [("CSV...", export::Format::Csv), ("HTML report...", export::Format::Html), ("JSON...", export::Format::Json)] {
                                 if ui.button(tr(label)).clicked() {
@@ -217,7 +307,7 @@ impl App {
                         self.big(ui, &mut out, Cmd::SnapshotSave, Icon::Export, "Snapshot...");
                     });
                     group(ui, &tr("Scan"), |ui| {
-                        if big_button(ui, Icon::Bolt, &tr("Fast NTFS scan (admin)"), !scanning, self.fast_ntfs).clicked() {
+                        if big_button(ui, Icon::Bolt, "Fast NTFS (admin)", !scanning, self.fast_ntfs).clicked() {
                             out = Some(Cmd::ToggleFast);
                         }
                     });
@@ -225,7 +315,7 @@ impl App {
                 3 => {
                     group(ui, &cap("GrpViewTitleAction", "View"), |ui| {
                         self.big(ui, &mut out, Cmd::ToggleDetails, Icon::Details, "Show Details");
-                        let resp = big_button(ui, Icon::Details, &tr("Configure columns"), true, false);
+                        let resp = big_button(ui, Icon::Details, "Configure columns", true, false);
                         egui::Popup::menu(&resp).show(|ui| {
                             for (c, label) in [(SortCol::Size, "Size"), (SortCol::Alloc, "Allocated"), (SortCol::Percent, "% of Parent"), (SortCol::Files, "Files"), (SortCol::Folders, "Folders"), (SortCol::Modified, "Last Modified")] {
                                 let mut on = self.column_visible(c);
@@ -234,7 +324,7 @@ impl App {
                                 }
                             }
                         });
-                        let resp = big_button(ui, Icon::Percent, &tr("Decimals"), true, false);
+                        let resp = big_button(ui, Icon::Percent, "Decimals", true, false);
                         egui::Popup::menu(&resp).show(|ui| {
                             for n in 0..=3u8 {
                                 if ui.selectable_label(self.settings.decimals == n, n.to_string()).clicked() {
@@ -249,7 +339,7 @@ impl App {
                     group(ui, &tr("Proportional map"), |ui| {
                         self.big(ui, &mut out, Cmd::MapRight(false), Icon::Treemap, "Map at the bottom");
                         self.big(ui, &mut out, Cmd::MapRight(true), Icon::Treemap, "Map on the right");
-                        let resp = big_button(ui, Icon::Tree, &tr("Level of detail"), self.settings.show_map, false);
+                        let resp = big_button(ui, Icon::Tree, "Level of detail", self.settings.show_map, false);
                         egui::Popup::menu(&resp).show(|ui| {
                             for n in 1..=4u8 {
                                 if ui.selectable_label(self.settings.map_levels == n, format!("{} {n}", tr("Level"))).clicked() {
@@ -258,7 +348,7 @@ impl App {
                                 }
                             }
                         });
-                        let colors = big_button(ui, Icon::Types, &tr("Map colors"), self.settings.show_map, false);
+                        let colors = big_button(ui, Icon::Types, "Map colors", self.settings.show_map, false);
                         egui::Popup::menu(&colors).show(|ui| {
                             for (by_type, label) in [(true, "By file type"), (false, "By folder level")] {
                                 if ui.selectable_label(self.settings.map_by_type == by_type, tr(label)).clicked() {
@@ -282,11 +372,11 @@ impl App {
                     });
                 }
                 4 => group(ui, &tr("Options"), |ui| {
-                    let resp = big_button(ui, Icon::Types, &tr("Language"), true, false);
+                    let resp = big_button(ui, Icon::Types, "Language", true, false);
                     egui::Popup::menu(&resp).show(|ui| {
                         super::dialogs::language_choices(ui, &mut self.settings.language);
                     });
-                    let resp = big_button(ui, Icon::Chart, &tr("Style"), true, false);
+                    let resp = big_button(ui, Icon::Chart, "Style", true, false);
                     egui::Popup::menu(&resp).show(|ui| {
                         ui.selectable_value(&mut self.settings.theme, Theme::Auto, tr("Detect automatically"));
                         ui.selectable_value(&mut self.settings.theme, Theme::Light, tr("Light"));
@@ -301,5 +391,24 @@ impl App {
         });
         });
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_caption_and_hint_has_a_french_text() {
+        let missing: Vec<&str> = HINTS.iter().flat_map(|(k, h)| [*k, *h]).filter(|t| !crate::i18n::is_translated("fr", t)).collect();
+        assert!(missing.is_empty(), "no French for: {missing:#?}");
+    }
+
+    #[test]
+    fn hints_are_unique_and_end_with_a_full_stop() {
+        for (i, (k, h)) in HINTS.iter().enumerate() {
+            assert!(h.ends_with('.'), "{k}: {h}");
+            assert!(HINTS.iter().skip(i + 1).all(|(k2, _)| k != k2), "duplicate hint for {k}");
+        }
     }
 }
