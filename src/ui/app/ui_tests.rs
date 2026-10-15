@@ -313,6 +313,13 @@ fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] options window: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_about = true);
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] about window: {t}")));
+        for permanently in [false, true] {
+            let out = frames(lang, egui::vec2(1200.0, 900.0), |a| {
+                a.ask_delete_files(vec![(PathBuf::from("C:/some/folder"), 1234)]);
+                a.delete_permanently = permanently;
+            });
+            problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] delete confirmation (permanent {permanently}): {t}")));
+        }
     }
     assert!(problems.is_empty(), "cut-off texts:
 {}", problems.join("
@@ -390,4 +397,82 @@ fn ribbon_captions_are_only_ever_broken_between_words() {
         out.textures_delta.clear();
         assert!(bad.is_empty(), "[{lang}] captions broken inside a word or in too many lines: {bad:#?}");
     }
+}
+
+/// Click the labelled button and let a few frames pass.
+fn click_label(h: &mut Harness<'_, App>, label: &str) {
+    let p = center_of(h, label);
+    click_at(h, p, PointerButton::Primary);
+}
+
+fn wait_for_delete(h: &mut Harness<'_, App>) {
+    for _ in 0..300 {
+        h.step();
+        if h.state().delete_job.is_none() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(h.state().delete_job.is_none(), "the deletion did not finish");
+    h.run_steps(3);
+}
+
+#[test]
+fn the_cleanup_list_ticks_the_safe_rows_and_deletes_them_permanently() {
+    let _g = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    let put = |p: &str, n: usize| {
+        let f = r.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, vec![1u8; n]).unwrap();
+    };
+    put("web/package.json", 10);
+    put("web/package-lock.json", 10);
+    put("web/node_modules/dep/index.js", 9000); // safe: lock file next to it
+    put("crate/Cargo.toml", 10);
+    put("crate/target/debug/a.bin", 8000); // safe
+    put("loose/package.json", 10);
+    put("loose/node_modules/x/i.js", 7000); // check first: no lock file
+    let mut h = harness(r);
+    h.state_mut().view = ViewKind::Cleanup;
+    h.run_steps(4);
+    assert_eq!((h.get_all_by_label("Safe").count(), h.get_all_by_label("Check first").count()), (2, 1), "both safety levels are listed");
+
+    click_label(&mut h, "Tick the safe ones");
+    assert_eq!(h.state().cleanup_checked.len(), 2, "only the two safe folders are ticked");
+    let safe_paths: Vec<_> = ["web/node_modules", "crate/target"].iter().map(|p| r.join(p)).collect();
+
+    let button = h.get_by_label_contains("Delete ticked").rect().center();
+    click_at(&mut h, button, PointerButton::Primary);
+    assert!(h.state().confirm.is_some(), "a confirmation is asked first");
+    assert!(safe_paths.iter().all(|p| p.exists()), "nothing is deleted before the confirmation");
+
+    click_label(&mut h, "Delete permanently (skip the Recycle Bin)");
+    assert!(h.state().delete_permanently);
+    click_label(&mut h, "Delete");
+    wait_for_delete(&mut h);
+
+    assert!(safe_paths.iter().all(|p| !p.exists()), "the safe folders are gone from the disk");
+    assert!(r.join("loose/node_modules/x/i.js").exists(), "the check-first folder is untouched");
+    assert!(r.join("web/package.json").exists() && r.join("crate/Cargo.toml").exists(), "project files stay");
+    assert!(h.state().cleanup_checked.is_empty());
+    assert!(h.state().notice.starts_with("Deleted: 2 - 16.6"), "two folders, 17,000 bytes: {:?}", h.state().notice);
+    assert!(h.state().delete_error.is_none());
+}
+
+#[test]
+fn permanent_deletion_refuses_the_profile_folder_and_leaves_it_alone() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    let home = std::path::PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).expect("a home folder"));
+    h.state_mut().ask_delete_files(vec![(home.clone(), 0)]);
+    h.run_steps(3);
+    assert!(h.state().confirm.is_some());
+    click_label(&mut h, "Delete permanently (skip the Recycle Bin)");
+    click_label(&mut h, "Delete");
+    wait_for_delete(&mut h);
+    assert!(home.exists(), "the folder is still there");
+    assert!(h.state().delete_error.as_ref().is_some_and(|e| e.contains("protected")), "{:?}", h.state().delete_error);
 }

@@ -48,6 +48,8 @@ pub enum ListEvent {
     Reveal(NodeId),
     Menu(NodeId, MenuAct),
     Select(NodeId),
+    /// Tick (true) or untick (false) a clean-up row.
+    Check(NodeId, bool),
     Open(NodeId),
     OpenPath(String),
 }
@@ -616,7 +618,7 @@ pub struct CleanRow {
 }
 
 /// Table of clean-up candidates; single click selects, double click opens in Explorer.
-pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeId>) -> Option<ListEvent> {
+pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeId>, checked: &std::collections::HashSet<NodeId>) -> Option<ListEvent> {
     let mut ev = None;
     ui.push_id("cleanup", |ui| {
         // Selectable labels would swallow the click that selects the row.
@@ -626,11 +628,13 @@ pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeI
             .resizable(true)
             .sense(Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(26.0))
             .column(Column::initial(210.0).at_least(80.0).clip(true))
             .column(Column::initial(90.0).at_least(60.0).clip(true))
-            .column(Column::initial(480.0).at_least(120.0).clip(true))
+            .column(Column::initial(450.0).at_least(120.0).clip(true))
             .column(Column::remainder().at_least(80.0))
             .header(22.0, |mut h| {
+                h.col(|_| {});
                 for t in ["Category", "Safety", "Path", "Size"] {
                     h.col(|ui| {
                         ui.label(RichText::new(tr(t)).strong());
@@ -641,6 +645,12 @@ pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeI
                 body.rows(20.0, rows.len(), |mut row| {
                     let r = &rows[row.index()];
                     row.set_selected(selected == Some(r.id));
+                    row.col(|ui| {
+                        let mut on = checked.contains(&r.id);
+                        if ui.checkbox(&mut on, "").changed() {
+                            ev = Some(ListEvent::Check(r.id, on));
+                        }
+                    });
                     row.col(|ui| {
                         ui.label(&r.kind);
                     });

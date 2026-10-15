@@ -1,4 +1,5 @@
 mod chrome;
+mod deletion;
 mod dialogs;
 mod ribbon;
 #[cfg(test)]
@@ -373,10 +374,15 @@ pub struct App {
     rows_dirty: bool,
     selected: Option<NodeId>,
     props: Option<NodeId>,
-    confirm_delete: Option<NodeId>,
+    /// Deletion waiting for the user's confirmation, and the one running in the background.
+    confirm: Option<deletion::DeleteRequest>,
+    delete_job: Option<deletion::DeleteJob>,
+    /// "Delete permanently" ticked in the confirmation window.
+    delete_permanently: bool,
+    /// Rows ticked in the clean-up list.
+    cleanup_checked: HashSet<NodeId>,
     name_dialog: Option<NameDialog>,
     /// Files waiting for confirmation before going to the Recycle Bin (duplicate clean-up).
-    confirm_files: Option<Vec<(PathBuf, u64)>>,
     comparison: Option<Comparison>,
     size_history: Vec<snapshot::HistoryPoint>,
     /// Number of folders refused with "access denied" in the last scan (offers an elevated restart).
@@ -387,7 +393,6 @@ pub struct App {
     explorer_menu: Option<bool>,
     /// Rows picked with Ctrl+click / Shift+click (the single `selected` row stays the primary one).
     multi: HashSet<NodeId>,
-    confirm_multi: Option<Vec<NodeId>>,
     find_focus: bool,
     find_stale: bool,
     find_text: String,
@@ -669,9 +674,11 @@ impl App {
             rows_dirty: true,
             selected: None,
             props: None,
-            confirm_delete: None,
+            confirm: None,
+            delete_job: None,
+            delete_permanently: false,
+            cleanup_checked: HashSet::new(),
             name_dialog: None,
-            confirm_files: None,
             comparison: None,
             size_history: Vec::new(),
             admin_hint: None,
@@ -679,7 +686,6 @@ impl App {
             find_open: false,
             explorer_menu: None,
             multi: HashSet::new(),
-            confirm_multi: None,
             find_focus: false,
             find_stale: false,
             find_text: String::new(),
@@ -1089,12 +1095,8 @@ impl App {
                     }
                 }
                 Action::MultiDelete => {
-                    if let Some(l) = &self.loaded {
-                        let ids = prune_nested(&l.tree, self.multi.iter().copied().filter(|&i| i != Tree::ROOT).collect());
-                        if !ids.is_empty() {
-                            self.confirm_multi = Some(ids);
-                        }
-                    }
+                    let ids: Vec<NodeId> = self.multi.iter().copied().collect();
+                    self.ask_delete_nodes(ids);
                 }
                 Action::MultiExclude => {
                     if let Some(l) = &mut self.loaded {
@@ -1120,7 +1122,7 @@ impl App {
                         open_in_explorer(&l.tree.path_of(id));
                     }
                 }
-                Action::Delete(id) => self.confirm_delete = Some(id),
+                Action::Delete(id) => self.ask_delete_nodes(vec![id]),
                 Action::Rescan(id) => self.start_sub_scan(id),
                 Action::Reveal(id) => self.reveal_in_tree(id),
                 Action::Open(id) => {
@@ -2081,7 +2083,7 @@ impl App {
             open_in_explorer(&p);
         }
         if let Some(d) = delete.filter(|d| !d.is_empty()) {
-            self.confirm_files = Some(d);
+            self.ask_delete_files(d);
         }
     }
 
@@ -2177,6 +2179,13 @@ impl App {
         }
         match ev {
             Some(ListEvent::Select(id)) => self.selected = Some(id),
+            Some(ListEvent::Check(id, on)) => {
+                if on {
+                    self.cleanup_checked.insert(id);
+                } else {
+                    self.cleanup_checked.remove(&id);
+                }
+            }
             Some(ListEvent::Reveal(id)) => self.reveal_in_tree(id),
             Some(ListEvent::Open(id)) => {
                 if let Some(l) = &self.loaded {
@@ -2642,61 +2651,26 @@ impl App {
         let total: u64 = rows.iter().map(|r| r.size).sum();
         let safe: u64 = rows.iter().filter(|r| r.risk == insights::Risk::Safe).map(|r| r.size).sum();
         ui.label(RichText::new(format!("{}: {} ({} {}) - {}: {}", tr("Can be reclaimed"), format_bytes(total), rows.len(), tr("folders"), tr("Safe"), format_bytes(safe))).strong());
+        // Ticks of rows that no longer exist (after a rescan or a deletion) are dropped.
+        self.cleanup_checked.retain(|id| rows.iter().any(|r| r.id == *id));
+        let checked_size: u64 = rows.iter().filter(|r| self.cleanup_checked.contains(&r.id)).map(|r| r.size).sum();
         ui.horizontal(|ui| {
-            let sel = self.selected.filter(|s| rows.iter().any(|r| r.id == *s));
-            if ui.add_enabled(sel.is_some(), egui::Button::new(tr("Delete (Recycle Bin)"))).clicked() {
-                self.confirm_delete = sel;
+            if ui.button(tr("Tick the safe ones")).clicked() {
+                self.cleanup_checked = rows.iter().filter(|r| r.risk == insights::Risk::Safe && r.size > 0).map(|r| r.id).collect();
             }
-            ui.weak(tr("Select a folder, then delete it. Nothing is removed without confirmation."));
+            if ui.add_enabled(!self.cleanup_checked.is_empty(), egui::Button::new(tr("Untick all"))).clicked() {
+                self.cleanup_checked.clear();
+            }
+            let label = format!("{} ({} - {})", tr("Delete ticked"), self.cleanup_checked.len(), format_bytes(checked_size));
+            if ui.add_enabled(!self.cleanup_checked.is_empty() && self.handle.is_none() && self.delete_job.is_none(), egui::Button::new(label)).clicked() {
+                let ids: Vec<NodeId> = self.cleanup_checked.iter().copied().collect();
+                self.ask_delete_nodes(ids);
+            }
         });
-        let ev = views::cleanup_list(ui, &rows, self.selected);
+        ui.weak(tr("Tick the folders to delete. Nothing is removed without confirmation."));
+        let ev = views::cleanup_list(ui, &rows, self.selected, &self.cleanup_checked);
         let ctx = ui.ctx().clone();
         self.list_event(&ctx, ev);
-    }
-
-    /// Confirmation (and execution) of a batch of file deletions from the duplicate finder.
-    fn files_delete_window(&mut self, ctx: &egui::Context) {
-        let Some(files) = self.confirm_files.clone() else { return };
-        let total: u64 = files.iter().map(|(_, s)| *s).sum();
-        let (mut yes, mut no) = (false, false);
-        egui::Window::new(tr("Delete (Recycle Bin)")).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.label(format!("{} {} - {}", files.len(), tr("Files"), format_bytes(total)));
-            egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                for (p, _) in files.iter().take(200) {
-                    ui.label(p.display().to_string());
-                }
-                if files.len() > 200 {
-                    ui.weak(format!("... +{}", files.len() - 200));
-                }
-            });
-            ui.horizontal(|ui| {
-                yes = ui.button(tr("Delete")).clicked();
-                no = ui.button(tr("Cancel")).clicked();
-            });
-        });
-        if no {
-            self.confirm_files = None;
-        } else if yes {
-            self.confirm_files = None;
-            let mut removed = HashSet::new();
-            let mut failed = 0usize;
-            for (p, _) in &files {
-                match crate::trash::recycle(p) {
-                    Ok(()) => {
-                        removed.insert(p.clone());
-                    }
-                    Err(_) => failed += 1,
-                }
-            }
-            if let Some(groups) = &mut self.dup_result {
-                duplicates::remove_paths(groups, &removed);
-            }
-            self.notice = if failed == 0 {
-                format!("{} {} - {}", removed.len(), tr("Files"), tr("Rescan to refresh the tree."))
-            } else {
-                format!("{} / {} {}", failed, files.len(), tr("could not be deleted"))
-            };
-        }
     }
 
     /// Rename / New folder prompt.
@@ -2767,121 +2741,10 @@ impl App {
         }
     }
 
-    fn delete_window(&mut self, ctx: &egui::Context) {
-        if self.confirm_delete.is_none() && self.delete_error.is_none() {
-            // Only where the selection is visible: a stale selection from another view must not be deletable blind.
-            let selection_visible = matches!(self.view, ViewKind::Tree | ViewKind::Largest | ViewKind::Oldest | ViewKind::Cleanup);
-            if selection_visible && ctx.input(|i| i.key_pressed(egui::Key::Delete)) && !ctx.egui_wants_keyboard_input() {
-                if self.multi.len() > 1 && self.handle.is_none() {
-                    let ctx2 = ctx.clone();
-                    self.apply(&ctx2, vec![Action::MultiDelete]);
-                } else if let Some(id) = self.selected.filter(|&id| id != Tree::ROOT && self.handle.is_none()) {
-                    self.confirm_delete = Some(id);
-                }
-            }
-            return;
-        }
-        if let Some(err) = self.delete_error.clone() {
-            let mut open = true;
-            egui::Window::new(tr("Delete (Recycle Bin)")).open(&mut open).collapsible(false).show(ctx, |ui| {
-                ui.label(err);
-                if ui.button(tr("OK")).clicked() {
-                    self.delete_error = None;
-                }
-            });
-            if !open {
-                self.delete_error = None;
-            }
-            return;
-        }
-        let Some(id) = self.confirm_delete else { return };
-        let Some(l) = &self.loaded else {
-            self.confirm_delete = None;
-            return;
-        };
-        let path = l.tree.path_of(id);
-        let size = l.tree.get(id).size;
-        let (mut yes, mut no) = (false, false);
-        egui::Window::new(tr("Delete (Recycle Bin)")).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.label(path.to_string_lossy());
-            ui.label(format_bytes(size));
-            ui.horizontal(|ui| {
-                yes = ui.button(tr("Delete")).clicked();
-                no = ui.button(tr("Cancel")).clicked();
-            });
-        });
-        if no {
-            self.confirm_delete = None;
-        } else if yes {
-            self.confirm_delete = None;
-            match crate::trash::recycle(&path) {
-                Ok(()) => {
-                    if let Some(l) = &mut self.loaded {
-                        l.tree.remove_subtree(id);
-                    }
-                    self.selected = None;
-                    self.view_root = Tree::ROOT;
-                    self.invalidate();
-                }
-                Err(e) => self.delete_error = Some(format!("{}: {e}", path.display())),
-            }
-        }
-    }
-
-    /// Confirmation and execution of deleting several tree rows at once.
-    fn multi_delete_window(&mut self, ctx: &egui::Context) {
-        let Some(ids) = self.confirm_multi.clone() else { return };
-        let Some(l) = &self.loaded else {
-            self.confirm_multi = None;
-            return;
-        };
-        // (id, path) pairs of the ids that still exist, so ids and paths can never get out of step.
-        let items: Vec<(NodeId, std::path::PathBuf)> = ids.iter().filter(|&&i| (i as usize) < l.tree.nodes.len()).map(|&i| (i, l.tree.path_of(i))).collect();
-        let total: u64 = items.iter().map(|(i, _)| l.tree.get(*i).size).sum();
-        let (mut yes, mut no) = (false, false);
-        egui::Window::new(tr("Delete (Recycle Bin)")).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.label(format!("{} {} - {}", items.len(), tr("items selected"), format_bytes(total)));
-            egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                for (_, p) in items.iter().take(200) {
-                    ui.label(p.display().to_string());
-                }
-            });
-            ui.horizontal(|ui| {
-                yes = ui.button(tr("Delete")).clicked();
-                no = ui.button(tr("Cancel")).clicked();
-            });
-        });
-        if no {
-            self.confirm_multi = None;
-        } else if yes {
-            self.confirm_multi = None;
-            let mut failed = Vec::new();
-            for (id, path) in &items {
-                match crate::trash::recycle(path) {
-                    Ok(()) => {
-                        if let Some(l) = &mut self.loaded {
-                            l.tree.remove_subtree(*id);
-                        }
-                    }
-                    Err(e) => failed.push(format!("{}: {e}", path.display())),
-                }
-            }
-            self.multi.clear();
-            self.selected = None;
-            self.view_root = Tree::ROOT;
-            self.invalidate();
-            if !failed.is_empty() {
-                self.delete_error = Some(failed.join("\n"));
-            }
-        }
-    }
-
     fn windows(&mut self, ctx: &egui::Context) {
         self.options_window(ctx);
-        self.multi_delete_window(ctx);
         self.delete_window(ctx);
         self.name_window(ctx);
-        self.files_delete_window(ctx);
         self.about_window(ctx);
         if let (Some(id), Some(l)) = (self.props, &self.loaded) {
             let mut open = true;
@@ -3012,6 +2875,7 @@ impl App {
         self.take_screenshot_event(&ctx);
         self.apply_settings(&ctx);
         self.poll_scan();
+        self.poll_delete(&ctx);
         self.poll_sub_scan();
         self.poll_duplicates();
         if self.handle.is_some() || self.dup_run.is_some() {
