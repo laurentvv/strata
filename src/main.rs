@@ -45,13 +45,17 @@ fn attach_parent_console() {}
 const USAGE: &str = "Strata - disk space analyzer
 
 Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
+       strata --renderer auto|opengl|directx|software [PATH]
+                                            how the window is drawn: auto tries OpenGL, then DirectX (which also works in virtual machines
+                                            without OpenGL); software forces the DirectX software adapter
        strata --cli [PATH] [-d N] [--export FILE.csv|json|html] [--changes] [--cleanup] [--fast]
                                             headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders;
                                             --fast reads the NTFS Master File Table of a whole drive (administrator only)
        strata --version
        strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--dialog options|about]
                       [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit
-       strata --simulate-start-failure      developer flag: show the message of a window that cannot be created";
+       strata --simulate-start-failure      developer flag: show the message of a window that cannot be created
+       strata --simulate-no-opengl          developer flag: make the OpenGL set-up fail to test the DirectX fallback";
 
 fn main() {
     diag::install_panic_hook(diag::log_path());
@@ -84,7 +88,6 @@ fn main() {
             std::process::exit(2);
         }
     };
-    diag::set_gui_running();
     let result = if simulate_failure { Err(eframe::Error::AppCreation("simulated start-up failure".into())) } else { ui::run(opts) };
     if let Err(e) = result {
         // No console with the GUI subsystem: a message box and the crash log are the only ways to tell the user.

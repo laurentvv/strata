@@ -2,6 +2,7 @@
 
 mod app;
 mod assets;
+mod launch;
 mod paint;
 mod theme;
 mod treemap;

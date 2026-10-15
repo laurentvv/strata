@@ -8,7 +8,9 @@ license = "MIT"
 [dependencies]
 rayon = "1.12"
 colored = "3.1"
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu_no_default_features", "wayland", "x11"] }
+# Software-capable fallback for machines without OpenGL (Hyper-V, remote sessions): DirectX 12 only (its WARP adapter runs on the CPU).
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 image = { version = "0.25.10", default-features = false, features = ["ico", "bmp", "png"] }
 crossbeam-channel = "0.5.17"
 egui_extras = "0.36.2"
