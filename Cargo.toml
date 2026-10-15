@@ -6,8 +6,8 @@ description = "Strata - a fast disk space analyzer with live treemap, scan histo
 license = "MIT"
 
 [dependencies]
-rayon = "1.10"
-colored = "2.1"
+rayon = "1.12"
+colored = "3.1"
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
 image = { version = "0.25.10", default-features = false, features = ["ico", "bmp", "png"] }
 crossbeam-channel = "0.5.17"
