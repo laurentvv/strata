@@ -425,6 +425,8 @@ pub struct App {
     shortcuts: Vec<(egui::KeyboardShortcut, Cmd)>,
     show_options: bool,
     show_about: bool,
+    /// "Copy diagnostics" was clicked in the About window.
+    about_copied: bool,
     about_icon: Option<egui::TextureHandle>,
     exclude_input: String,
     /// The excluded-folders list changed since the last scan.
@@ -595,6 +597,9 @@ pub fn run(opts: RunOptions) -> eframe::Result<()> {
         "strata",
         options,
         Box::new(move |cc| {
+            if let Some(gl) = &cc.gl {
+                crate::diag::set_graphics(crate::diag::graphics_text(gl));
+            }
             let mut app = App::new(&cc.egui_ctx, st, &opts);
             if let Some(p) = &opts.start {
                 let cleaned = PathBuf::from(scan::model::clean_path_input(&p.to_string_lossy()));
@@ -717,6 +722,7 @@ impl App {
             shortcuts,
             show_options: false,
             show_about: false,
+            about_copied: false,
             about_icon: None,
             exclude_input: String::new(),
             excludes_changed: false,

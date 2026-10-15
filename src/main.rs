@@ -4,6 +4,7 @@
 
 mod analysis;
 mod cli;
+mod diag;
 mod export;
 mod fmt;
 mod i18n;
@@ -49,10 +50,14 @@ Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
                                             --fast reads the NTFS Master File Table of a whole drive (administrator only)
        strata --version
        strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--dialog options|about]
-                      [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit";
+                      [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit
+       strata --simulate-start-failure      developer flag: show the message of a window that cannot be created";
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    diag::install_panic_hook(diag::log_path());
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let simulate_failure = args.iter().any(|a| a == "--simulate-start-failure");
+    args.retain(|a| a != "--simulate-start-failure");
     let help = args.iter().any(|a| a == "-h" || a == "--help");
     if args.iter().any(|a| a == "-V" || a == "--version") {
         attach_parent_console();
@@ -79,7 +84,11 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(e) = ui::run(opts) {
+    diag::set_gui_running();
+    let result = if simulate_failure { Err(eframe::Error::AppCreation("simulated start-up failure".into())) } else { ui::run(opts) };
+    if let Err(e) = result {
+        // No console with the GUI subsystem: a message box and the crash log are the only ways to tell the user.
+        diag::report_start_failure(&e.to_string());
         attach_parent_console();
         eprintln!("GUI error: {e}");
         std::process::exit(1);

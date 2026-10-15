@@ -15,9 +15,8 @@ labels: bug
 
 **Environment**
 
-- Strata version:
-- Windows version:
+- Paste the diagnostics here (Help tab > About > Copy diagnostics): version, Windows build, graphics driver, administrator or not.
 - Drive type / file system (NTFS, exFAT, network...):
-- Started as administrator: yes / no
+- If Strata crashed or did not start: the `crash.log` from the Strata settings folder (`%APPDATA%\strata`), after checking it holds nothing private.
 
 Please do not paste screenshots or paths that contain personal data.
