@@ -362,6 +362,8 @@ fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
             a.bin.queried = true;
         });
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] System space view: {t}")));
+        let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.updates.offer = Some(crate::update::Release { version: "12.34.56".into(), url: "https://github.com/laurentvv/strata/releases/tag/v12.34.56".into() }));
+        problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] update banner: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_options = true);
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] options window: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_about = true);
@@ -764,4 +766,90 @@ fn a_scan_never_starts_in_a_view_that_waits_for_the_scan_to_end() {
     app.path_text = fx.root.to_string_lossy().into_owned();
     app.start_scan();
     assert_eq!(app.view, ViewKind::Cleanup);
+}
+
+fn release(version: &str) -> crate::update::Release {
+    crate::update::Release { version: version.into(), url: format!("https://github.com/laurentvv/strata/releases/tag/v{version}") }
+}
+
+#[test]
+fn the_update_check_never_asks_the_network_unless_it_is_on_and_the_app_persists() {
+    let _g = lock();
+    let ctx = egui::Context::default();
+    for (on, persist) in [(false, true), (true, false), (false, false)] {
+        let mut app = App::new(&ctx, Settings { language: "en".into(), check_updates: on, ..Settings::default() }, &RunOptions::default());
+        app.persist_enabled = persist;
+        app.settings_path = None;
+        app.maybe_check_for_update();
+        assert!(app.updates.rx.is_none(), "check_updates {on}, persistence {persist}");
+    }
+}
+
+#[test]
+fn a_newer_release_is_offered_unless_skipped_and_a_failure_changes_nothing() {
+    let _g = lock();
+    let ctx = egui::Context::default();
+    let answer = |r: Result<crate::update::Outcome, String>| {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(r).unwrap();
+        rx
+    };
+    let mut app = App::new(&ctx, Settings { language: "en".into(), skip_update_version: "0.3.0".into(), ..Settings::default() }, &RunOptions::default());
+    app.updates.rx = Some(answer(Err("offline".into())));
+    app.poll_update(&ctx);
+    assert!(app.updates.offer.is_none() && app.settings.last_update_check == 0, "a failure is silent and retried at the next launch");
+    app.updates.rx = Some(answer(Ok(crate::update::Outcome::Available(release("0.3.0")))));
+    app.poll_update(&ctx);
+    assert!(app.updates.offer.is_none(), "a skipped version is not offered again");
+    assert!(app.settings.last_update_check > 0, "but the check counts as done");
+    app.updates.rx = Some(answer(Ok(crate::update::Outcome::Available(release("0.4.0")))));
+    app.poll_update(&ctx);
+    assert_eq!(app.updates.offer, Some(release("0.4.0")));
+    app.updates.offer = None;
+    app.updates.rx = Some(answer(Ok(crate::update::Outcome::UpToDate)));
+    app.poll_update(&ctx);
+    assert!(app.updates.offer.is_none());
+}
+
+#[test]
+fn the_update_banner_names_the_version_and_can_skip_or_dismiss_it() {
+    let _g = lock();
+    let mut h = start_harness_with(|a| a.updates.offer = Some(release("0.9.0")));
+    assert!(h.query_by_label_contains("0.9.0").is_some());
+    assert!(h.query_by_label("Open the download page").is_some());
+    let p = center_of(&h, "Dismiss");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().updates.offer.is_none());
+    assert!(h.state().settings.skip_update_version.is_empty(), "dismissing is for this run only");
+    let mut h = start_harness_with(|a| a.updates.offer = Some(release("0.9.0")));
+    let p = center_of(&h, "Skip this version");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().updates.offer.is_none());
+    assert_eq!(h.state().settings.skip_update_version, "0.9.0", "skipping is remembered");
+}
+
+#[test]
+fn the_options_window_offers_the_update_check_and_says_what_it_sends() {
+    let _g = lock();
+    let mut h = start_harness_with(|a| a.show_options = true);
+    assert!(h.query_by_label("Updates").is_some());
+    assert!(!h.state().settings.check_updates);
+    let p = center_of(&h, "Check for a newer version when Strata starts");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().settings.check_updates, "ticking turns it on");
+    assert!(h.query_by_label_contains("sees your IP address").is_some(), "the note says what the request reveals");
+}
+
+#[test]
+fn the_update_texts_are_translated() {
+    for t in [
+        "A newer version is available: {version} (you have {current}).",
+        "Open the download page",
+        "Skip this version",
+        "Updates",
+        "Check for a newer version when Strata starts",
+        "Asks GitHub for the latest release at most once a day (GitHub sees your IP address, as for any web request). No information about your files is sent, and nothing is downloaded or installed.",
+    ] {
+        assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
+    }
 }

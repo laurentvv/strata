@@ -68,7 +68,9 @@ on the runner before the files are published.
 - The software DirectX path uses a little more memory and some CPU than OpenGL.
 - The commands shown in System space are Microsoft's documented ones, but Strata does not run them: read the text
   next to each before using them.
-- No automatic update and no update check yet.
+- Strata never updates itself. The optional update check (off by default: Options > Updates, or
+  `strata --check-update`) only tells you when a newer release exists and opens its page. It asks GitHub at most once a
+  day; GitHub sees your IP address and nothing about your files.
 
 ## Reporting a problem
 
