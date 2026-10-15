@@ -20,7 +20,10 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   .NET `bin`/`obj`, `__pycache__`, ...), browser caches, `AppData\Local\Temp`, crash dumps, package-manager
   caches, `Windows.old`; plus empty folders, duplicate files (keep one copy; hard links are not copies) and
   size by file age. Dependency folders of installed programs and globally installed tools are never offered.
-- **Safe by default**: deletions go to the Recycle Bin after a confirmation.
+- **Safe by default**: deletions go to the Recycle Bin after a confirmation (a note says the space is only freed
+  once it is emptied). "Delete permanently" is an unticked option of the confirmation; drive roots, the Windows
+  and program folders and the profile folders themselves are always refused. Deletions run in the background with
+  progress and a Stop button.
 - **Explorer-like actions**: right-click menu on every row (open, terminal, rename, new folder,
   rescan one folder, copy path, properties), Ctrl/Shift multi-selection, keyboard navigation,
   drag a folder onto the window to scan it.
