@@ -1,0 +1,190 @@
+//! Options and About dialogs.
+
+use super::{assets, App};
+use crate::i18n::{self, tr};
+use crate::settings::{SizeMode, Theme, Units};
+use eframe::egui::{self, RichText};
+use std::path::PathBuf;
+
+fn units_label(u: Units) -> String {
+    match u {
+        Units::Auto => tr("Automatic Units"),
+        Units::Bytes => tr("Values in Byte"),
+        Units::KB => tr("Values in KB"),
+        Units::MB => tr("Values in MB"),
+        Units::GB => tr("Values in GB"),
+        Units::TB => tr("Values in TB"),
+    }
+}
+
+/// The selectable languages (system default, English, every translation), shared by the Options
+/// dialog and the ribbon.
+pub(super) fn language_choices(ui: &mut egui::Ui, current: &mut String) {
+    // Scroll instead of running off the screen when the list grows.
+    egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+        let cur = current.clone();
+        if ui.selectable_label(cur == "auto", language_label("auto")).clicked() {
+            *current = "auto".into();
+        }
+        if ui.selectable_label(cur == "en", "English (en)").clicked() {
+            *current = "en".into();
+        }
+        for l in i18n::LOCALES {
+            if ui.selectable_label(cur.eq_ignore_ascii_case(l.code), format!("{} ({})", l.name, l.code)).clicked() {
+                *current = l.code.to_string();
+            }
+        }
+    });
+}
+
+/// Text of the language combo for the current setting.
+fn language_label(setting: &str) -> String {
+    if setting.eq_ignore_ascii_case("auto") || setting.is_empty() {
+        return format!("{} ({})", tr("Detect automatically"), i18n::resolve_language(setting));
+    }
+    match i18n::find_locale(setting) {
+        Some(l) => format!("{} ({})", l.name, l.code),
+        None => "English (en)".to_string(),
+    }
+}
+
+impl App {
+    pub(super) fn options_window(&mut self, ctx: &egui::Context) {
+        if !self.show_options {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(tr("Options")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("options_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                ui.label(tr("Language"));
+                egui::ComboBox::from_id_salt("lang").width(260.0).selected_text(language_label(&self.settings.language)).show_ui(ui, |ui| {
+                    language_choices(ui, &mut self.settings.language);
+                });
+                ui.end_row();
+
+                ui.label(tr("Unit"));
+                ui.horizontal_wrapped(|ui| {
+                    for u in Units::ALL {
+                        ui.selectable_value(&mut self.settings.units, u, units_label(u));
+                    }
+                });
+                ui.end_row();
+
+                ui.label(tr("Decimals"));
+                ui.horizontal(|ui| {
+                    for n in 0..=3u8 {
+                        ui.selectable_value(&mut self.settings.decimals, n, n.to_string());
+                    }
+                });
+                ui.end_row();
+
+                ui.label(tr("Percent"));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.settings.size_mode, SizeMode::Size, tr("Size"));
+                    ui.selectable_value(&mut self.settings.size_mode, SizeMode::Allocated, tr("Allocated Space"));
+                });
+                ui.end_row();
+
+                ui.label(tr("Style"));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.settings.theme, Theme::Auto, tr("Detect automatically"));
+                    ui.selectable_value(&mut self.settings.theme, Theme::Light, tr("Light"));
+                    ui.selectable_value(&mut self.settings.theme, Theme::Dark, tr("Dark"));
+                });
+                ui.end_row();
+
+                ui.label(tr("Columns"));
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut self.settings.show_allocated, tr("Allocated"));
+                    ui.checkbox(&mut self.settings.details, tr("Show Details"));
+                    ui.checkbox(&mut self.settings.show_map, tr("Proportional map"));
+                });
+                ui.end_row();
+
+                ui.label(tr("Scan"));
+                ui.vertical(|ui| {
+                    ui.checkbox(&mut self.fast_ntfs, tr("Fast NTFS scan (admin)"));
+                    ui.checkbox(&mut self.settings.always_admin, tr("Always start as administrator"));
+                    if cfg!(windows) {
+                        let mut on = *self.explorer_menu.get_or_insert_with(|| crate::shell_ext::is_installed(crate::shell_ext::KEY_NAME));
+                        if ui.checkbox(&mut on, tr("Show in the Explorer context menu")).changed() {
+                            let ok = if on {
+                                std::env::current_exe().is_ok_and(|exe| crate::shell_ext::install(&exe, crate::shell_ext::KEY_NAME, &tr("Analyze with Strata")))
+                            } else {
+                                crate::shell_ext::uninstall(crate::shell_ext::KEY_NAME)
+                            };
+                            self.explorer_menu = Some(if ok { on } else { !on });
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+            ui.separator();
+            ui.label(RichText::new(tr("Excluded folders")).strong());
+            ui.label(tr("Applied at the next scan."));
+            let mut remove = None;
+            egui::ScrollArea::vertical().max_height(120.0).id_salt("excl").show(ui, |ui| {
+                if self.excludes.is_empty() {
+                    ui.weak(tr("(none)"));
+                }
+                for (i, e) in self.excludes.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("x").on_hover_text(tr("Remove")).clicked() {
+                            remove = Some(i);
+                        }
+                        ui.add(egui::Label::new(e.display().to_string()).truncate());
+                    });
+                }
+            });
+            if let Some(i) = remove {
+                self.excludes.remove(i);
+            }
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.exclude_input).desired_width(260.0).hint_text(tr("Path to scan")));
+                if ui.button(tr("Add new")).clicked() && !self.exclude_input.trim().is_empty() {
+                    self.excludes.push(PathBuf::from(self.exclude_input.trim()));
+                    self.exclude_input.clear();
+                }
+                if ui.button("...").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        self.excludes.push(d);
+                    }
+                }
+            });
+        });
+        self.show_options = open;
+    }
+
+    /// About box: icon, name, version and a short description.
+    pub(super) fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        if self.about_icon.is_none() {
+            self.about_icon = assets::icon_texture(ctx);
+        }
+        let mut open = true;
+        egui::Window::new(tr("About Strata")).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(tex) = &self.about_icon {
+                    ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+                }
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Strata").size(26.0).strong());
+                    ui.label(format!("{} {}", tr("Version"), env!("CARGO_PKG_VERSION")));
+                    ui.label(tr("Disk space analyzer"));
+                    ui.add_space(6.0);
+                    ui.weak(tr("Live treemap, scan history, clean-up tools."));
+                    ui.weak(tr("Written in Rust with egui."));
+                });
+            });
+            ui.add_space(8.0);
+            if ui.button(tr("Close")).clicked() {
+                self.show_about = false;
+            }
+        });
+        if !open {
+            self.show_about = false;
+        }
+    }
+}
