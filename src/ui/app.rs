@@ -7,6 +7,7 @@ mod ui_tests;
 
 use self::chrome::Cmd;
 use super::assets;
+use super::launch;
 use super::paint::{self, Icon};
 use super::views::{self, ListEvent, MenuAct};
 use crate::analysis::duplicates::{self, DupGroup};
@@ -453,7 +454,7 @@ struct ShotState {
 }
 
 /// Command-line options of the GUI.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct RunOptions {
     pub start: Option<PathBuf>,
     pub screenshot: Option<PathBuf>,
@@ -465,6 +466,10 @@ pub struct RunOptions {
     pub tab: Option<usize>,
     /// Dialog to open before the screenshot: "options" or "about".
     pub dialog: Option<String>,
+    /// How the window is drawn (`--renderer`).
+    pub renderer: launch::RendererChoice,
+    /// Make the OpenGL set-up fail on purpose, to test the DirectX fallback.
+    pub simulate_no_opengl: bool,
 }
 
 pub fn parse_view(name: &str) -> Option<ViewKind> {
@@ -500,6 +505,11 @@ pub fn parse_args(args: &[String]) -> Result<RunOptions, String> {
             }
             "--lang" => o.lang = Some(it.next().ok_or("--lang needs a code")?.clone()),
             "--dialog" => o.dialog = Some(it.next().ok_or("--dialog needs options or about")?.clone()),
+            "--renderer" => {
+                let v = it.next().ok_or("--renderer needs auto, opengl, directx or software")?;
+                o.renderer = launch::RendererChoice::parse(v).ok_or_else(|| format!("unknown renderer '{v}' (auto, opengl, directx or software)"))?;
+            }
+            "--simulate-no-opengl" => o.simulate_no_opengl = true,
             "--tab" => o.tab = Some(it.next().ok_or("--tab needs a number 0-4")?.parse().map_err(|_| "--tab needs a number 0-4")?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             s => o.start = Some(PathBuf::from(s)),
@@ -592,27 +602,48 @@ pub fn run(opts: RunOptions) -> eframe::Result<()> {
     if let Some(icon) = assets::window_icon() {
         vp = vp.with_icon(std::sync::Arc::new(icon));
     }
-    let options = eframe::NativeOptions { viewport: vp, centered: geom.is_none(), ..Default::default() };
-    eframe::run_native(
-        "strata",
-        options,
-        Box::new(move |cc| {
-            if let Some(gl) = &cc.gl {
-                crate::diag::set_graphics(crate::diag::graphics_text(gl));
-            }
-            let mut app = App::new(&cc.egui_ctx, st, &opts);
-            if let Some(p) = &opts.start {
-                let cleaned = PathBuf::from(scan::model::clean_path_input(&p.to_string_lossy()));
-                let cleaned = scan::model::normalize_root(&cleaned);
-                let abs = std::path::absolute(&cleaned).unwrap_or(cleaned);
-                app.path_text = abs.to_string_lossy().into_owned();
-                app.start_scan();
-            }
-            Ok(Box::new(app))
-        }),
-    )
+    let centered = geom.is_none();
+    let attempts = launch::attempts(opts.renderer, opts.simulate_no_opengl);
+    for (i, attempt) in attempts.iter().copied().enumerate() {
+        let options = launch::native_options(vp.clone(), centered, attempt);
+        let creator = app_creator(st.clone(), opts.clone());
+        // A panic while the graphics are set up counts as a failure of this attempt, like an error.
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| eframe::run_native("strata", options, creator)));
+        let error = match started {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(e)) if launch::graphics_failure(&e) => e.to_string(),
+            Ok(Err(e)) => return Err(e),
+            Err(payload) => format!("panic while setting up the window: {}", crate::diag::payload_text(&*payload)),
+        };
+        crate::diag::log_note(&format!("{} could not be used: {error}", attempt.name()));
+        if i + 1 == attempts.len() {
+            return Err(eframe::Error::AppCreation(error.into()));
+        }
+    }
+    Err(eframe::Error::AppCreation("no way of drawing the window".into()))
 }
 
+/// Builds the app once the window and its renderer exist.
+fn app_creator(st: Settings, opts: RunOptions) -> eframe::AppCreator<'static> {
+    Box::new(move |cc| {
+        crate::diag::set_gui_running();
+        if let Some(gl) = &cc.gl {
+            crate::diag::set_graphics(crate::diag::graphics_text(gl));
+        }
+        if let Some(rs) = &cc.wgpu_render_state {
+            crate::diag::set_graphics(launch::adapter_text(&rs.adapter.get_info()));
+        }
+        let mut app = App::new(&cc.egui_ctx, st, &opts);
+        if let Some(p) = &opts.start {
+            let cleaned = PathBuf::from(scan::model::clean_path_input(&p.to_string_lossy()));
+            let cleaned = scan::model::normalize_root(&cleaned);
+            let abs = std::path::absolute(&cleaned).unwrap_or(cleaned);
+            app.path_text = abs.to_string_lossy().into_owned();
+            app.start_scan();
+        }
+        Ok(Box::new(app))
+    })
+}
 
 impl App {
     fn new(ctx: &egui::Context, st: Settings, opts: &RunOptions) -> Self {

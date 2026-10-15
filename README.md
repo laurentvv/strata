@@ -44,7 +44,9 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
 ## Install
 
 Strata is a single `strata.exe`: no installer, no runtime to install (the C runtime is linked in; only
-Windows system DLLs and a graphics driver with OpenGL support are needed). Download the zip of a release,
+Windows system DLLs are needed). The window is drawn with OpenGL when the machine has it; otherwise
+(for example some virtual machines) with DirectX 12, on the CPU when there is no graphics card.
+`strata.exe --renderer opengl|directx|software` forces one of them. Download the zip of a release,
 unpack it anywhere and run it. Settings and scan history live in `%APPDATA%\strata`; for a **portable**
 copy (USB stick, shared folder), create an empty file named `strata.portable` next to `strata.exe` and
 they are kept in `strata-data` beside it instead. Releases also carry a per-user MSI (no administrator rights,
@@ -82,6 +84,9 @@ Settings, scan history and snapshots live in `%APPDATA%\strata`.
   the normal scan on a real 252 GB volume (95,078 files): same sizes and folder count, every hard link listed
   under its own name, 3 more files (in `System Volume Information`, which the normal scan may not read), and 1.2 s
   instead of 79 s on a cold cache. Compare it on your own drives with `tools/validate_mft.ps1`.
+- The DirectX fallback was checked on a PC by forcing the software adapter (`--renderer software`) and by making
+  OpenGL fail on purpose (`--simulate-no-opengl`); it has not been run inside a Hyper-V guest yet. It makes the
+  program about 5 MB bigger, and the software adapter uses a little more memory and some CPU.
 - If the window cannot be created, or Strata stops unexpectedly, it says so in a message box and writes `crash.log` in
   the settings folder. Help > About > Copy diagnostics gives the version, Windows build and graphics driver to paste
   into a bug report. `strata --cli PATH` needs no window.

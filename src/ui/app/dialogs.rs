@@ -210,6 +210,9 @@ impl App {
                     ui.add_space(6.0);
                     ui.weak(tr("Live treemap, scan history, clean-up tools."));
                     ui.weak(tr("Written in Rust with egui."));
+                    if let Some(g) = crate::diag::graphics() {
+                        ui.weak(g);
+                    }
                 });
             });
             ui.add_space(8.0);

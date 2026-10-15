@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-/// Set once the GUI is running: a panic of the main thread then shows a message box.
+/// Set once the window exists: a panic of the main thread then shows a message box (before that, a failure
+/// is reported by the start-up code, which may still try another way of drawing the window).
 static GUI_RUNNING: AtomicBool = AtomicBool::new(false);
 /// "OpenGL version | renderer", known once the window exists.
 static GRAPHICS: OnceLock<String> = OnceLock::new();
@@ -21,6 +22,11 @@ pub fn set_gui_running() {
 
 pub fn set_graphics(text: String) {
     let _ = GRAPHICS.set(text);
+}
+
+/// How the window is drawn, once it exists.
+pub fn graphics() -> Option<&'static str> {
+    GRAPHICS.get().map(String::as_str)
 }
 
 /// What the driver says about itself, for the diagnostics.
@@ -58,7 +64,7 @@ fn os_version() -> String {
 /// Version, system, rights and graphics of this run, ready to paste into a bug report.
 pub fn diagnostics() -> String {
     let portable = std::env::current_exe().ok().and_then(|e| crate::settings::portable_dir(&e)).is_some();
-    diagnostics_text(env!("CARGO_PKG_VERSION"), &os_version(), std::env::consts::ARCH, crate::scan::mft::is_elevated(), portable, GRAPHICS.get().map(String::as_str))
+    diagnostics_text(env!("CARGO_PKG_VERSION"), &os_version(), std::env::consts::ARCH, crate::scan::mft::is_elevated(), portable, graphics())
 }
 
 fn diagnostics_text(version: &str, os: &str, arch: &str, elevated: bool, portable: bool, graphics: Option<&str>) -> String {
@@ -106,6 +112,18 @@ fn scrub_location(file: &str) -> String {
     norm
 }
 
+/// The text of a panic payload.
+pub fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "(no message)".to_string())
+}
+
+/// A line in the crash log that is not a crash (a fallback that worked, say), to help with bug reports.
+pub fn log_note(text: &str) {
+    if let Some(p) = log_path() {
+        let _ = append_report(&p, &format!("=== {} ===\nNote: {text}\n\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+    }
+}
+
 /// Build the report of a panic and add it to the log; returns the report.
 fn record_panic(log: Option<&Path>, thread: &str, message: &str, file: &str, line: u32) -> String {
     let report = crash_report(&diagnostics(), thread, message, &format!("{}:{line}", scrub_location(file)));
@@ -122,8 +140,7 @@ pub fn install_panic_hook(log: Option<PathBuf>) {
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("unnamed");
-        let payload = info.payload();
-        let message = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "(no message)".to_string());
+        let message = payload_text(info.payload());
         let (file, line) = info.location().map_or(("?", 0), |l| (l.file(), l.line()));
         record_panic(log.as_deref(), name, &message, file, line);
         previous(info);
