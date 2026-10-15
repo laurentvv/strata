@@ -365,6 +365,8 @@ pub struct App {
     drives: Vec<String>,
     /// Space usage of each drive for the start page, filled by a background thread.
     drive_infos: Vec<(String, scan::DiskInfo)>,
+    /// Common folders offered on the start page (looked up the first time it is drawn).
+    quick_folders: Option<Vec<(&'static str, PathBuf)>>,
     drive_rx: Option<std::sync::mpsc::Receiver<Vec<(String, scan::DiskInfo)>>>,
     handle: Option<ScanHandle>,
     /// A live snapshot of the running scan has been shown (ids are then remapped by path).
@@ -716,6 +718,7 @@ impl App {
             dup_min: "64KB".into(),
             drives,
             drive_infos: Vec::new(),
+            quick_folders: None,
             drive_rx,
             handle: None,
             partial_seen: false,
@@ -2657,7 +2660,7 @@ impl App {
         }
     }
 
-    /// Start page: one card per drive with its space usage (click to scan), then recent folders.
+    /// Start page: one card per drive with its space usage (click to scan), common folders, then recent folders.
     fn start_page(&mut self, ui: &mut egui::Ui) {
         if let Some(rx) = &self.drive_rx {
             if let Ok(v) = rx.try_recv() {
@@ -2705,6 +2708,18 @@ impl App {
                 }
             }
         });
+        let quick = self.quick_folders.get_or_insert_with(crate::shell::quick_folders).clone();
+        if !quick.is_empty() {
+            ui.add_space(16.0);
+            ui.label(RichText::new(tr("Common folders")).strong());
+            ui.horizontal_wrapped(|ui| {
+                for (label, path) in &quick {
+                    if ui.button(tr(label)).on_hover_text(path.display().to_string()).clicked() {
+                        start = Some(path.to_string_lossy().into_owned());
+                    }
+                }
+            });
+        }
         if !self.settings.recent.is_empty() {
             ui.add_space(16.0);
             ui.label(RichText::new(tr("Recent")).strong());

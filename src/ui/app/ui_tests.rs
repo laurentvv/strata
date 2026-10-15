@@ -488,12 +488,16 @@ fn permanent_deletion_refuses_the_profile_folder_and_leaves_it_alone() {
 
 /// A start page (no scan) of an app that believes it runs without administrator rights.
 fn start_harness(not_admin: bool) -> Harness<'static, App> {
+    start_harness_with(|a| a.not_admin = not_admin)
+}
+
+fn start_harness_with(setup: impl FnOnce(&mut App)) -> Harness<'static, App> {
     let ctx = egui::Context::default();
     let st = Settings { language: "en".into(), ..Settings::default() };
     let mut app = App::new(&ctx, st, &RunOptions::default());
     app.persist_enabled = false;
     app.settings_path = None;
-    app.not_admin = not_admin;
+    setup(&mut app);
     let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_step_dt(0.05).build_ui_state(|ui, app: &mut App| app.draw(ui), app);
     h.run_steps(4);
     h
@@ -618,6 +622,34 @@ fn the_recycle_bin_texts_are_translated() {
         "Emptying the Recycle Bin...",
         "items",
     ] {
+        assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
+    }
+}
+
+#[test]
+fn a_common_folder_on_the_start_page_starts_its_scan() {
+    let _g = lock();
+    let fx = fixture();
+    let root = fx.root.clone();
+    let mut h = start_harness_with(|a| a.quick_folders = Some(vec![("Downloads", root), ("Your user folder", std::env::temp_dir())]));
+    assert!(h.query_by_label("Common folders").is_some());
+    assert!(h.query_by_label("Your user folder").is_some());
+    let p = center_of(&h, "Downloads");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert_eq!(h.state().path_text, fx.root.to_string_lossy(), "the folder is put in the path box");
+    for _ in 0..600 {
+        h.step();
+        if h.state().handle.is_none() && h.state().loaded.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(h.state().loaded.is_some(), "and scanned");
+}
+
+#[test]
+fn the_common_folder_names_are_translated() {
+    for t in ["Common folders", "Your user folder", "Downloads", "Desktop", "Documents", "App data", "All users", "Temporary files"] {
         assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
     }
 }
