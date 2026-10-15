@@ -79,6 +79,10 @@ pub fn file_tile(level: Color32) -> Color32 {
 
 pub const MAP_FREE: Color32 = rgb(52, 60, 72);
 pub const MAP_BORDER: Color32 = rgb(8, 16, 22);
+
+/// Clean-up safety labels: green for safe to delete, amber for "check first".
+pub const RISK_SAFE: Color32 = rgb(96, 190, 120);
+pub const RISK_CHECK: Color32 = rgb(236, 180, 70);
 pub const MAP_SELECTED: Color32 = rgb(255, 214, 90);
 
 /// Colour of bars in charts (age buckets, size history, drive usage).

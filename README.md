@@ -15,8 +15,11 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   on hover. Switch to colours by folder level in the View tab.
 - **Scan history**: every finished scan is stored; the Changes view ranks what grew or vanished since
   any earlier scan, with a size-over-time chart.
-- **Clean-up**: known reclaimable folders (`node_modules`, Cargo `target`, `__pycache__`,
-  `Windows.old`, ...), empty folders, duplicate files (keep one copy), size by file age.
+- **Clean-up**: reclaimable folders, each marked *Safe* (regenerated automatically) or *Check first*:
+  build output and dependency folders of your projects (`node_modules` with a lock file, Cargo `target`,
+  .NET `bin`/`obj`, `__pycache__`, ...), browser caches, `AppData\Local\Temp`, crash dumps, package-manager
+  caches, `Windows.old`; plus empty folders, duplicate files (keep one copy; hard links are not copies) and
+  size by file age. Dependency folders of installed programs and globally installed tools are never offered.
 - **Safe by default**: deletions go to the Recycle Bin after a confirmation.
 - **Explorer-like actions**: right-click menu on every row (open, terminal, rename, new folder,
   rescan one folder, copy path, properties), Ctrl/Shift multi-selection, keyboard navigation,
