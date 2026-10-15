@@ -12,8 +12,9 @@ their `.sha256` files as a workflow artifact. No release is created.
 ## 2. Release
 
 1. Bump `version` in `Cargo.toml` (the MSI takes its version from it), merge.
-2. Write `RELEASE_NOTES.md` at the repository root (features, known limits, measurements); without it
-   the notes are generated from the merged pull requests.
+2. Update `RELEASE_NOTES.md` at the repository root (features, known limits, measurements); without it
+   the notes are generated from the merged pull requests. A test checks that its title names the version of
+   `Cargo.toml`, so notes from an earlier release are never published by mistake.
 3. Push the tag: `git tag v0.1.0 && git push origin v0.1.0`. The workflow creates a **draft** release with the zip,
    the MSI and their SHA-256 files.
 4. Download the files from the draft, try them (Windows Sandbox is handy), then press *Publish release*.

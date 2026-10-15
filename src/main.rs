@@ -97,3 +97,18 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The release workflow publishes RELEASE_NOTES.md as the text of a release: it must be about this version
+    /// and must not carry a user folder.
+    #[test]
+    fn the_release_notes_are_about_the_current_version_and_hold_no_personal_path() {
+        let notes = include_str!("../RELEASE_NOTES.md");
+        let title = format!("# Strata {}", env!("CARGO_PKG_VERSION"));
+        assert!(notes.starts_with(&title), "RELEASE_NOTES.md must start with '{title}'");
+        for needle in ["C:\\Users", "AppData\\Roaming", "/home/"] {
+            assert!(!notes.contains(needle), "RELEASE_NOTES.md mentions {needle}");
+        }
+    }
+}
