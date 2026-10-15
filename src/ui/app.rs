@@ -443,7 +443,7 @@ pub struct RunOptions {
     pub live: bool,
     pub view: Option<ViewKind>,
     pub lang: Option<String>,
-    /// Ribbon tab to show (0 = File ... 5 = Help), for screenshots.
+    /// Ribbon tab to show (0 = Home ... 4 = Help), for screenshots.
     pub tab: Option<usize>,
     /// Dialog to open before the screenshot: "options" or "about".
     pub dialog: Option<String>,
@@ -482,7 +482,7 @@ pub fn parse_args(args: &[String]) -> Result<RunOptions, String> {
             }
             "--lang" => o.lang = Some(it.next().ok_or("--lang needs a code")?.clone()),
             "--dialog" => o.dialog = Some(it.next().ok_or("--dialog needs options or about")?.clone()),
-            "--tab" => o.tab = Some(it.next().ok_or("--tab needs a number 0-5")?.parse().map_err(|_| "--tab needs a number 0-5")?),
+            "--tab" => o.tab = Some(it.next().ok_or("--tab needs a number 0-4")?.parse().map_err(|_| "--tab needs a number 0-4")?),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'")),
             s => o.start = Some(PathBuf::from(s)),
         }
@@ -640,7 +640,7 @@ impl App {
             col_live: Vec::new(),
             col_changed: Instant::now(),
             files_expanded: HashSet::new(),
-            ribbon_tab: opts.tab.unwrap_or(1).min(5),
+            ribbon_tab: opts.tab.unwrap_or(0).min(4),
             disk: None,
             settings: st,
             settings_path,
@@ -1322,7 +1322,6 @@ impl App {
                 self.settings.map_right = r;
                 self.settings.show_map = true;
             }
-            Cmd::Exit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Cmd::NewInstance => {
                 if let Ok(exe) = std::env::current_exe() {
                     let _ = std::process::Command::new(exe).spawn();

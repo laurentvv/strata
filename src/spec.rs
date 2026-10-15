@@ -15,7 +15,6 @@ pub enum Cmd {
     SortBy(SortKey),
     SetUnits(Units),
     ToggleDetails,
-    Exit,
     NewInstance,
     Filter,
     Options,

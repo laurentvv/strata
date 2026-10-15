@@ -305,7 +305,7 @@ fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
     let mut problems = Vec::new();
     for lang in ["en", "fr"] {
         // The default window width (1200): every ribbon tab must fit without scrolling.
-        for tab in 0..=5usize {
+        for tab in 0..=4usize {
             let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.ribbon_tab = tab);
             problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] ribbon tab {tab}: {t}")));
         }
