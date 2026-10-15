@@ -2778,17 +2778,17 @@ impl App {
                 self.ask_delete_nodes(ids);
             }
         });
-        if cfg!(windows) {
-            ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
+            if cfg!(windows) {
                 if ui.button(tr("Windows Disk Cleanup")).on_hover_text(tr("For Windows Update files and system logs, which Strata does not delete itself.")).clicked() {
                     let _ = std::process::Command::new("cleanmgr.exe").spawn();
                 }
                 if ui.button(tr("Windows storage settings")).clicked() {
                     let _ = std::process::Command::new("cmd").args(["/C", "start", "", "ms-settings:storagesense"]).spawn();
                 }
-                self.bin_button(ui);
-            });
-        }
+            }
+            self.bin_button(ui);
+        });
         ui.weak(tr("Tick the folders to delete. Nothing is removed without confirmation."));
         let ev = views::cleanup_list(ui, &rows, self.selected, &self.cleanup_checked);
         let ctx = ui.ctx().clone();
