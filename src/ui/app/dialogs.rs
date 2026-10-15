@@ -191,6 +191,7 @@ impl App {
     /// About box: icon, name, version and a short description.
     pub(super) fn about_window(&mut self, ctx: &egui::Context) {
         if !self.show_about {
+            self.about_copied = false;
             return;
         }
         if self.about_icon.is_none() {
@@ -212,9 +213,18 @@ impl App {
                 });
             });
             ui.add_space(8.0);
-            if ui.button(tr("Close")).clicked() {
-                self.show_about = false;
-            }
+            ui.horizontal(|ui| {
+                if ui.button(tr("Close")).clicked() {
+                    self.show_about = false;
+                }
+                if ui.button(tr("Copy diagnostics")).on_hover_text(tr("Copy the version, Windows build and graphics driver to paste into a bug report.")).clicked() {
+                    ui.ctx().copy_text(crate::diag::diagnostics());
+                    self.about_copied = true;
+                }
+                if self.about_copied {
+                    ui.weak(tr("Copied"));
+                }
+            });
         });
         if !open {
             self.show_about = false;

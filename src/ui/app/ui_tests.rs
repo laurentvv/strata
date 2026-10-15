@@ -543,3 +543,19 @@ fn the_administrator_notice_texts_are_translated() {
         assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
     }
 }
+
+#[test]
+fn the_about_window_copies_the_diagnostics_and_says_so() {
+    let _g = lock();
+    let mut h = start_harness(false);
+    h.state_mut().show_about = true;
+    h.run_steps(4);
+    assert!(h.query_by_label("Copied").is_none());
+    let p = center_of(&h, "Copy diagnostics");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().about_copied);
+    assert!(h.query_by_label("Copied").is_some(), "the click is acknowledged");
+    h.state_mut().show_about = false;
+    h.run_steps(3);
+    assert!(!h.state().about_copied, "closing the window forgets it");
+}

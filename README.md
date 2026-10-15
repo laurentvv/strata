@@ -82,6 +82,9 @@ Settings, scan history and snapshots live in `%APPDATA%\strata`.
   the normal scan on a real 252 GB volume (95,078 files): same sizes and folder count, every hard link listed
   under its own name, 3 more files (in `System Volume Information`, which the normal scan may not read), and 1.2 s
   instead of 79 s on a cold cache. Compare it on your own drives with `tools/validate_mft.ps1`.
+- If the window cannot be created, or Strata stops unexpectedly, it says so in a message box and writes `crash.log` in
+  the settings folder. Help > About > Copy diagnostics gives the version, Windows build and graphics driver to paste
+  into a bug report. `strata --cli PATH` needs no window.
 - Windows is the target platform. Linux builds and passes its tests; macOS is not maintained.
 - Memory for `C:\Windows` (measured with `tools/measure.ps1`): about 230 MB peak and about 160 MB once the
   scan is done (110 MB of that is the window itself); about 1 GB peak for a 3.75 M-file drive.
