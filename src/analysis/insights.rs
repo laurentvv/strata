@@ -218,6 +218,60 @@ pub fn reclaimable(tree: &Tree) -> Vec<Reclaimable> {
     out
 }
 
+/// Parts of a machine where a big old file is part of the system or of installed software, not of the
+/// user's data: never suggested for deletion.
+fn in_system_area(tree: &Tree, id: NodeId) -> bool {
+    let mut cur = tree.get(id).parent;
+    while cur != crate::scan::NONE {
+        let name = tree.name(cur);
+        let comps: Vec<&str> = if tree.get(cur).parent == crate::scan::NONE { name.split(['\\', '/']).filter(|c| !c.is_empty()).collect() } else { vec![name] };
+        if comps.iter().any(|c| {
+            ["windows", "program files", "program files (x86)", "programdata", "windowsapps", "$recycle.bin", "system volume information"].iter().any(|s| c.eq_ignore_ascii_case(s))
+        }) {
+            return true;
+        }
+        cur = tree.get(cur).parent;
+    }
+    false
+}
+
+/// A big file nobody touched for a long time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OldFile {
+    pub id: NodeId,
+    pub size: u64,
+    /// Whole days since it was last modified.
+    pub age_days: u64,
+}
+
+/// Files of at least `min_size` bytes last modified `min_age_days` ago or more, biggest first (at most
+/// `limit`). Files inside folders that are already offered whole, in system areas or inside installed
+/// software are left out.
+pub fn large_old_files(tree: &Tree, now_secs: i64, min_size: u64, min_age_days: u64, limit: usize) -> Vec<OldFile> {
+    let offered: std::collections::HashSet<NodeId> = reclaimable(tree).into_iter().map(|r| r.id).collect();
+    let mut out: Vec<OldFile> = tree
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.is_dir && !n.is_link && n.size >= min_size && n.modified > 0)
+        .map(|(i, n)| OldFile { id: i as NodeId, size: n.size, age_days: (now_secs - n.modified).max(0) as u64 / 86_400 })
+        .filter(|f| f.age_days >= min_age_days)
+        .filter(|f| {
+            let mut cur = tree.get(f.id).parent;
+            while cur != crate::scan::NONE {
+                if offered.contains(&cur) {
+                    return false;
+                }
+                cur = tree.get(cur).parent;
+            }
+            !in_system_area(tree, f.id) && !inside_installed_software(tree, f.id)
+        })
+        .collect();
+    out.sort_by(|a, b| b.size.cmp(&a.size).then(a.id.cmp(&b.id)));
+    out.truncate(limit);
+    out
+}
+
 /// Folders that hold nothing at all (no files, no sub-folders), in tree order. Links and the
 /// insides of reclaimable folders are skipped.
 pub fn empty_dirs(tree: &Tree) -> Vec<NodeId> {
@@ -396,6 +450,39 @@ mod tests {
         let found = reclaimable(&tree);
         assert_eq!(found.len(), 1, "scanning AppData\\Local directly still finds Temp");
         assert_eq!(found[0].kind, "Temporary files");
+    }
+
+    #[test]
+    fn large_old_files_skip_young_small_system_and_already_offered_ones() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        write(&r.join("Users/me/Videos/old_big.mkv"), 5000);
+        write(&r.join("Users/me/Videos/young_big.mkv"), 6000);
+        write(&r.join("Users/me/Videos/old_small.txt"), 10);
+        write(&r.join("Windows/Installer/old_big.msi"), 9000);
+        write(&r.join("Program Files/App/old_big.dll"), 9000);
+        write(&r.join("proj/package.json"), 10);
+        write(&r.join("proj/package-lock.json"), 10);
+        write(&r.join("proj/node_modules/x/big_old.bin"), 7000); // inside a folder offered whole
+        let mut tree = scan_simple(r).tree;
+        let now = 2_000_000_000i64;
+        let day = 86_400;
+        for (path, age_days) in [
+            (vec!["Users", "me", "Videos", "old_big.mkv"], 800),
+            (vec!["Users", "me", "Videos", "young_big.mkv"], 20),
+            (vec!["Users", "me", "Videos", "old_small.txt"], 900),
+            (vec!["Windows", "Installer", "old_big.msi"], 900),
+            (vec!["Program Files", "App", "old_big.dll"], 900),
+            (vec!["proj", "node_modules", "x", "big_old.bin"], 900),
+        ] {
+            let id = tree.resolve_path(&path).unwrap();
+            tree.nodes[id as usize].modified = now - age_days * day;
+        }
+        let found = large_old_files(&tree, now, 1000, 365, 10);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(tree.name(found[0].id), "old_big.mkv");
+        assert_eq!((found[0].size, found[0].age_days), (5000, 800));
+        assert_eq!(large_old_files(&tree, now, 1000, 365, 0).len(), 0, "the limit applies");
     }
 
     #[test]

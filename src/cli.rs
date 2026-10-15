@@ -115,6 +115,13 @@ fn print_cleanup(tree: &Tree) {
         println!("  {:>10}  {:<9} {:<32} {}", format_bytes(f.size), f.risk.label(), f.kind, tree.path_of(f.id).display());
     }
     println!("  Empty folders: {}", insights::empty_dirs(tree).len());
+    let old = insights::large_old_files(tree, chrono::Utc::now().timestamp(), 100 << 20, 365, 20);
+    if !old.is_empty() {
+        println!("  Large files not modified for over a year (check before deleting):");
+        for f in old {
+            println!("  {:>10}  {:>4} days  {}", format_bytes(f.size), f.age_days, tree.path_of(f.id).display());
+        }
+    }
 }
 
 pub fn run(args: &[String]) {
