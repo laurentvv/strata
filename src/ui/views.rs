@@ -116,7 +116,7 @@ pub fn breadcrumb(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId) {
                 ui.label(">");
             }
             let last = i + 1 == chain.len();
-            let name = tree.get(id).name.clone();
+            let name = tree.name(id).to_string();
             if last {
                 ui.label(RichText::new(name).strong());
             } else if ui.add(egui::Button::new(name).frame(false)).clicked() {
@@ -188,8 +188,7 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
             TileKind::FilesBlock => Some(format!("[{} {}] ({})", crate::fmt::group_int(t.files), tr("Files"), format_bytes(t.size))),
             TileKind::Free => Some(format!("{} ({})", tr("Free space"), format_bytes(t.size))),
             TileKind::File | TileKind::Folder if t.has_header || (t.rect.w > 56.0 && t.rect.h > HEADER_H) => {
-                let n = tree.get(t.id);
-                Some(if t.rect.w > 130.0 { format!("{} ({})", n.name, format_bytes(t.size)) } else { n.name.clone() })
+                Some(if t.rect.w > 130.0 { format!("{} ({})", tree.name(t.id), format_bytes(t.size)) } else { tree.name(t.id).to_string() })
             }
             _ => None,
         };
@@ -226,8 +225,8 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
             _ => tree.path_of(t.id).display().to_string(),
         };
         let total = if style.free_space.is_some() { tree.get(*root).size + style.free_space.unwrap_or(0) } else { tree.get(*root).size }.max(1);
-        resp.clone().on_hover_text_at_pointer(format!("{}\n{} ({:.1}% {} {})", what, format_bytes(t.size), t.size as f64 * 100.0 / total as f64, tr("of"), tree.get(*root).name));
-        let drillable = t.kind == TileKind::Folder && n.is_dir && !n.children.is_empty();
+        resp.clone().on_hover_text_at_pointer(format!("{}\n{} ({:.1}% {} {})", what, format_bytes(t.size), t.size as f64 * 100.0 / total as f64, tr("of"), tree.name(*root)));
+        let drillable = t.kind == TileKind::Folder && n.is_dir && !tree.children(t.id).is_empty();
         if resp.double_clicked() && drillable && !docked {
             *root = t.id;
         } else if resp.clicked() && matches!(t.kind, TileKind::Folder | TileKind::File | TileKind::FilesBlock) {

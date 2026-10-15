@@ -37,11 +37,11 @@ const RULES: &[Rule] = &[
 
 fn rule_for(tree: &Tree, id: NodeId) -> Option<&'static Rule> {
     let n = tree.get(id);
-    let lower = n.name.to_lowercase();
+    let lower = tree.name(id).to_lowercase();
     let rule = RULES.iter().find(|r| r.name == lower)?;
     if let Some(sib) = rule.needs_sibling {
-        let parent = tree.get(n.parent.min(tree.nodes.len() as u32 - 1));
-        if n.parent == crate::scan::NONE || !parent.children.iter().any(|&c| tree.get(c).name.eq_ignore_ascii_case(sib)) {
+        let parent = n.parent.min(tree.nodes.len() as u32 - 1);
+        if n.parent == crate::scan::NONE || !tree.children(parent).iter().any(|&c| tree.name(c).eq_ignore_ascii_case(sib)) {
             return None;
         }
     }
@@ -69,7 +69,7 @@ pub fn reclaimable(tree: &Tree) -> Vec<Reclaimable> {
                 continue;
             }
         }
-        stack.extend(n.children.iter().copied());
+        stack.extend(tree.children(id).iter().copied());
     }
     out.sort_by(|a, b| b.size.cmp(&a.size).then(a.id.cmp(&b.id)));
     out
@@ -91,10 +91,10 @@ pub fn empty_dirs(tree: &Tree) -> Vec<NodeId> {
         if id != Tree::ROOT && rule_for(tree, id).is_some() {
             continue; // already offered as a whole by `reclaimable`
         }
-        if id != Tree::ROOT && n.children.is_empty() {
+        if id != Tree::ROOT && tree.children(id).is_empty() {
             out.push(id);
         }
-        stack.extend(n.children.iter().copied());
+        stack.extend(tree.children(id).iter().copied());
     }
     out.sort_unstable();
     out
@@ -160,7 +160,7 @@ mod tests {
         let found = reclaimable(&tree);
         let names: Vec<(&str, u64)> = found.iter().map(|f| (f.kind, f.size)).collect();
         assert_eq!(names, [("Node.js dependencies", 5900), ("Rust build output", 3000), ("Python bytecode cache", 100)]);
-        assert!(found.iter().all(|f| tree.get(f.id).name != "target" || tree.get(tree.get(f.id).parent).name == "crate"));
+        assert!(found.iter().all(|f| tree.name(f.id) != "target" || tree.name(tree.get(f.id).parent) == "crate"));
     }
 
     #[test]
@@ -173,7 +173,7 @@ mod tests {
         write(&r.join("app/package.json"), 1);
         std::fs::create_dir_all(r.join("app/node_modules/pkg/empty_inside")).unwrap();
         let tree = scan_simple(r).tree;
-        let names: Vec<&str> = empty_dirs(&tree).iter().map(|&i| tree.get(i).name.as_str()).collect();
+        let names: Vec<&str> = empty_dirs(&tree).iter().map(|&i| tree.name(i)).collect();
         assert!(names.contains(&"empty") && names.contains(&"child"));
         assert!(!names.contains(&"parent") && !names.contains(&"full"));
         assert!(!names.contains(&"empty_inside"), "inside a reclaimable folder");

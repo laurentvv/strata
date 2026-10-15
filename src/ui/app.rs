@@ -73,7 +73,7 @@ fn row_key(tree: &Tree, k: RowKind, files: &DirectFiles) -> Key {
     match k {
         RowKind::Node(id) => {
             let n = tree.get(id);
-            Key { name: n.name.to_lowercase(), size: n.size, alloc: n.alloc, files: n.files, dirs: n.dirs, modified: n.modified }
+            Key { name: tree.name(id).to_lowercase(), size: n.size, alloc: n.alloc, files: n.files, dirs: n.dirs, modified: n.modified }
         }
         RowKind::Files(_) => Key { name: files_label(files.count).to_lowercase(), size: files.size, alloc: files.alloc, files: files.count, dirs: 0, modified: files.modified },
     }
@@ -96,7 +96,7 @@ fn key_cmp(sort: SortCol, desc: bool, a: &Key, b: &Key) -> std::cmp::Ordering {
 fn build_sib(tree: &Tree, id: NodeId, filtering: bool, sort: SortCol, desc: bool, hide_empty: bool) -> Sib {
     let files = if filtering { DirectFiles::default() } else { tree.direct_files(id) };
     let mut items: Vec<(RowKind, Key)> = Vec::new();
-    for &c in &tree.get(id).children {
+    for &c in tree.children(id) {
         let n = tree.get(c);
         // Aggregated counts, not `children`: live snapshots hold directories only, so a folder
         // full of files has no child nodes there.
@@ -200,16 +200,15 @@ fn find_matches(tree: &Tree, needle: &str) -> Vec<NodeId> {
         None => name.to_lowercase().contains(&needle),
     };
     let mut out = Vec::new();
-    let mut stack: Vec<NodeId> = tree.get(Tree::ROOT).children.iter().rev().copied().collect();
+    let mut stack: Vec<NodeId> = tree.children(Tree::ROOT).iter().rev().copied().collect();
     while let Some(id) = stack.pop() {
-        let n = tree.get(id);
-        if matches(&n.name) {
+        if matches(tree.name(id)) {
             out.push(id);
             if out.len() >= 5000 {
                 break;
             }
         }
-        stack.extend(n.children.iter().rev().copied());
+        stack.extend(tree.children(id).iter().rev().copied());
     }
     out
 }
@@ -248,7 +247,7 @@ const MIN_SIZE: (f32, f32) = (640.0, 360.0);
 
 fn expandable(tree: &Tree, id: NodeId) -> bool {
     let n = tree.get(id);
-    n.is_dir && (!n.children.is_empty() || (tree.live.is_some() && tree.direct_files(id).count > 0))
+    n.is_dir && (!tree.children(id).is_empty() || (tree.live.is_some() && tree.direct_files(id).count > 0))
 }
 
 enum Action {
@@ -499,11 +498,11 @@ pub fn expand_levels(tree: &Tree, levels: Option<u32>) -> HashSet<NodeId> {
     let mut stack = vec![(Tree::ROOT, 0u32)];
     while let Some((id, d)) = stack.pop() {
         let n = tree.get(id);
-        if !n.is_dir || n.children.is_empty() || levels.is_some_and(|l| d >= l) {
+        if !n.is_dir || tree.children(id).is_empty() || levels.is_some_and(|l| d >= l) {
             continue;
         }
         out.insert(id);
-        stack.extend(n.children.iter().map(|&c| (c, d + 1)));
+        stack.extend(tree.children(id).iter().map(|&c| (c, d + 1)));
     }
     out
 }
@@ -888,12 +887,12 @@ impl App {
         let Some(dir) = snapshot::history_dir() else { return };
         self.comparison = snapshot::record_and_compare(&dir, &l.tree, chrono::Utc::now().timestamp())
             .map(|(taken, changes)| Comparison { label: tr("last scan"), taken, changes });
-        self.size_history = snapshot::history_points(&dir, &l.tree.get(Tree::ROOT).name);
+        self.size_history = snapshot::history_points(&dir, l.tree.name(Tree::ROOT));
     }
 
     fn save_snapshot_dialog(&mut self) {
         let Some(l) = &self.loaded else { return };
-        let root = l.tree.get(Tree::ROOT).name.clone();
+        let root = l.tree.name(Tree::ROOT).to_string();
         let snap = Snapshot::from_tree(&l.tree, chrono::Utc::now().timestamp());
         let mut dlg = rfd::FileDialog::new().add_filter("Snapshot", &["json"]).set_file_name("snapshot.json");
         if let Some(d) = snapshot::history_dir() {
@@ -912,7 +911,7 @@ impl App {
     fn compare_with_history(&mut self, taken: i64) {
         let Some(l) = &self.loaded else { return };
         let Some(dir) = snapshot::history_dir() else { return };
-        let root = l.tree.get(Tree::ROOT).name.clone();
+        let root = l.tree.name(Tree::ROOT).to_string();
         match Snapshot::load(&snapshot::history_file(&dir, &root, taken)) {
             Ok(old) => {
                 let new = Snapshot::from_tree(&l.tree, chrono::Utc::now().timestamp());
@@ -1003,8 +1002,7 @@ impl App {
                     RowKind::Files(dir) => {
                         if tree.has_file_nodes() && self.files_expanded.contains(&dir) {
                             let mut items: Vec<(NodeId, Key)> = tree
-                                .get(dir)
-                                .children
+                                .children(dir)
                                 .iter()
                                 .copied()
                                 .filter(|&c| !tree.get(c).is_dir)
@@ -1144,12 +1142,12 @@ impl App {
                             if !n.is_dir {
                                 continue;
                             }
-                            if expand && !n.children.is_empty() {
+                            if expand && !l.tree.children(cur).is_empty() {
                                 self.expanded.insert(cur);
                             } else if !expand && cur != Tree::ROOT {
                                 self.expanded.remove(&cur);
                             }
-                            stack.extend(n.children.iter().copied());
+                            stack.extend(l.tree.children(cur).iter().copied());
                         }
                         self.rows_dirty = true;
                     }
@@ -1157,12 +1155,12 @@ impl App {
                 Action::CountSubfolders(id) => {
                     if let Some(l) = &self.loaded {
                         let n = l.tree.get(id);
-                        self.notice = format!("{}: {} {}, {} {}", n.name, fmt::group_int(n.dirs), tr("Folders"), fmt::group_int(n.files), tr("Files"));
+                        self.notice = format!("{}: {} {}, {} {}", l.tree.name(id), fmt::group_int(n.dirs), tr("Folders"), fmt::group_int(n.files), tr("Files"));
                     }
                 }
                 Action::Rename(id) => {
                     if let Some(l) = &self.loaded {
-                        self.name_dialog = Some(NameDialog { id, new_folder: false, text: l.tree.get(id).name.clone(), err: String::new(), focused: false });
+                        self.name_dialog = Some(NameDialog { id, new_folder: false, text: l.tree.name(id).to_string(), err: String::new(), focused: false });
                     }
                 }
                 Action::NewFolder(id) => self.name_dialog = Some(NameDialog { id, new_folder: true, text: String::new(), err: String::new(), focused: false }),
@@ -1661,7 +1659,7 @@ impl App {
                         (files_label(f.count), f.size, f.alloc, Some(f.count), None, f.modified, if by_alloc { f.alloc } else { f.size }, metric(n), false, false, false, tree.has_file_nodes() && f.count > 0, files_expanded.contains(&id))
                     } else {
                         let den = if n.parent == NONE { 0 } else { metric(tree.get(n.parent)) };
-                        (n.name.clone(), n.size, n.alloc, n.is_dir.then_some(n.files), n.is_dir.then_some(n.dirs), n.modified, metric(n), den, n.is_dir, n.is_link, n.scanning, expandable(tree, id), filtering || expanded.contains(&id))
+                        (tree.name(id).to_string(), n.size, n.alloc, n.is_dir.then_some(n.files), n.is_dir.then_some(n.dirs), n.modified, metric(n), den, n.is_dir, n.is_link, n.scanning, expandable(tree, id), filtering || expanded.contains(&id))
                     };
                     let is_root = !pseudo && n.parent == NONE;
                     let frac = if is_root { 1.0 } else if den > 0 { (num as f64 / den as f64).min(1.0) } else { 0.0 };
@@ -2087,7 +2085,7 @@ impl App {
         }
         if self.view == ViewKind::Compare {
             let mut pick = None;
-            let open = views::compare_view(ui, self.comparison.as_ref().map(|c| (c.label.as_str(), c.taken, c.changes.as_slice())), &self.size_history, &mut pick, &self.compare_notice, self.loaded.as_ref().map(|l| l.tree.get(Tree::ROOT).name.as_str()));
+            let open = views::compare_view(ui, self.comparison.as_ref().map(|c| (c.label.as_str(), c.taken, c.changes.as_slice())), &self.size_history, &mut pick, &self.compare_notice, self.loaded.as_ref().map(|l| l.tree.name(Tree::ROOT)));
             if let Some(t) = pick {
                 self.compare_with_history(t);
             }
@@ -2724,7 +2722,7 @@ impl App {
             match std::fs::rename(&path, path.with_file_name(&name)) {
                 Ok(()) => {
                     if let Some(l) = &mut self.loaded {
-                        l.tree.nodes[d.id as usize].name = name;
+                        l.tree.set_name(d.id, &name);
                     }
                     self.invalidate();
                 }
@@ -3115,22 +3113,17 @@ mod tests {
     fn hide_empty_keeps_live_folders_that_only_hold_files() {
         // Live snapshots hold directories only: a folder full of files has no child nodes but non-zero counts.
         let mut t = Tree::placeholder("root");
-        let proto = t.nodes[0].clone();
         let mut add = |name: &str, files: u64, size: u64| {
-            let mut n = proto.clone();
-            n.name = name.into();
-            n.parent = 0;
-            n.files = files;
-            n.size = size;
-            n.scanning = false;
-            t.nodes.push(n);
-            let id = (t.nodes.len() - 1) as NodeId;
-            t.nodes[0].children.push(id);
+            let n = scan::model::Node { files, size, ..scan::model::Node::blank(0, true) };
+            let id = t.push_node(name, n);
+            let mut kids = t.children(0).to_vec();
+            kids.push(id);
+            t.set_children(0, &kids);
         };
         add("has_files", 3, 300);
         add("truly_empty", 0, 0);
         let names = |hide: bool| -> Vec<String> {
-            build_sib(&t, 0, false, SortCol::Name, false, hide).order.iter().filter_map(|k| if let RowKind::Node(i) = k { Some(t.get(*i).name.clone()) } else { None }).collect()
+            build_sib(&t, 0, false, SortCol::Name, false, hide).order.iter().filter_map(|k| if let RowKind::Node(i) = k { Some(t.name(*i).to_string()) } else { None }).collect()
         };
         assert_eq!(names(true), ["has_files"]);
         assert_eq!(names(false), ["has_files", "truly_empty"]);
@@ -3168,7 +3161,7 @@ mod tests {
             std::fs::write(path, b"x").unwrap();
         }
         let t = scan::scan_simple(d.path()).tree;
-        let names = |q: &str| find_matches(&t, q).iter().map(|&i| t.get(i).name.clone()).collect::<Vec<_>>();
+        let names = |q: &str| find_matches(&t, q).iter().map(|&i| t.name(i).to_string()).collect::<Vec<_>>();
         assert_eq!(names("report"), ["Report.txt", "report_old"]);
         assert_eq!(names("  NOTES "), ["notes.txt"]);
         assert!(names("zzz").is_empty() && names("").is_empty());
@@ -3211,30 +3204,14 @@ mod tests {
     #[test]
     fn files_row_is_aggregated_sorted_and_flagged() {
         use scan::model::Node;
-        let n = |name: &str, parent, children: Vec<NodeId>, is_dir, size, modified| Node {
-            name: name.into(),
-            parent,
-            children,
-            size,
-            alloc: size,
-            files: 0,
-            dirs: 0,
-            modified,
-            attrs: 0,
-            is_dir,
-            is_link: false,
-            scanning: false,
-        };
+        let mut t = Tree::default();
+        let mut n = |name: &str, parent, is_dir, size, modified| t.push_node(name, Node { size, alloc: size, modified, ..Node::blank(parent, is_dir) });
         // R -> [big dir (500), f1 (100), f2 (30)]
-        let t = Tree {
-            nodes: vec![
-                n("R", NONE, vec![1, 2, 3], true, 630, 0),
-                n("big", 0, vec![], true, 500, 5),
-                n("f1", 0, vec![], false, 100, 9),
-                n("f2", 0, vec![], false, 30, 7),
-            ],
-            ..Default::default()
-        };
+        n("R", NONE, true, 630, 0);
+        n("big", 0, true, 500, 5);
+        n("f1", 0, false, 100, 9);
+        n("f2", 0, false, 30, 7);
+        t.set_children(0, &[1, 2, 3]);
         let sib = build_sib(&t, 0, false, SortCol::Size, true, false);
         assert_eq!(sib.order, vec![RowKind::Node(1), RowKind::Files(0)], "files collapse into one pseudo-row");
         assert_eq!((sib.files.count, sib.files.size, sib.files.modified), (2, 130, 9));

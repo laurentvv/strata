@@ -19,7 +19,7 @@ fn print_node(tree: &Tree, id: NodeId, prefix: &str, is_last: bool, max_depth: u
         "{}{}{} {:>10}  {} {:>6}  ({:>4} files, {:>3} dirs)",
         prefix.dimmed(),
         branch.dimmed(),
-        n.name.bold().green(),
+        tree.name(id).bold().green(),
         format_bytes(n.size).bold().white(),
         bar,
         format!("{:>5.1}%", percent).cyan(),
@@ -34,7 +34,7 @@ fn print_node(tree: &Tree, id: NodeId, prefix: &str, is_last: bool, max_depth: u
         format!("{}│   ", prefix)
     };
     // Directories only, largest first.
-    let mut kids: Vec<NodeId> = n.children.iter().copied().filter(|&c| tree.get(c).is_dir).collect();
+    let mut kids: Vec<NodeId> = tree.children(id).iter().copied().filter(|&c| tree.get(c).is_dir).collect();
     kids.sort_by_key(|&c| std::cmp::Reverse(tree.get(c).size));
     let last = kids.len().saturating_sub(1);
     for (i, c) in kids.into_iter().enumerate() {

@@ -10,9 +10,7 @@ pub const NONE: NodeId = u32::MAX;
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    pub name: String,
     pub parent: NodeId,
-    pub children: Vec<NodeId>,
     /// Logical size in bytes (aggregated for directories).
     pub size: u64,
     /// Size allocated on disk in bytes (aggregated for directories).
@@ -30,6 +28,35 @@ pub struct Node {
     pub is_link: bool,
     /// Live-scan snapshots only: the directory is still being read (its totals are still growing).
     pub scanning: bool,
+    /// Range of this node's name inside `Tree::names` (use `Tree::name`).
+    pub(crate) name_off: u32,
+    pub(crate) name_len: u32,
+    /// Range of this node's child list inside `Tree::kids` (use `Tree::children`).
+    pub(crate) child_start: u32,
+    pub(crate) child_len: u32,
+}
+
+impl Node {
+    /// A zeroed node below `parent`; callers override the fields they know and add it with
+    /// `Tree::push_node`.
+    pub fn blank(parent: NodeId, is_dir: bool) -> Node {
+        Node {
+            parent,
+            size: 0,
+            alloc: 0,
+            files: 0,
+            dirs: 0,
+            modified: 0,
+            attrs: 0,
+            is_dir,
+            is_link: false,
+            scanning: false,
+            name_off: 0,
+            name_len: 0,
+            child_start: 0,
+            child_len: 0,
+        }
+    }
 }
 
 /// Direct (non-recursive) files of one directory, shown as the "[N Files]" pseudo-row.
@@ -74,6 +101,10 @@ pub struct LiveStats {
 #[derive(Debug, Clone, Default)]
 pub struct Tree {
     pub nodes: Vec<Node>,
+    /// All node names, concatenated (addressed by `Node::name_off` / `name_len`).
+    pub(crate) names: String,
+    /// Flat child lists (addressed by `Node::child_start` / `child_len`).
+    pub(crate) kids: Vec<NodeId>,
     /// Present on live-scan snapshots only (the final tree retains its file nodes instead).
     pub live: Option<Box<LiveStats>>,
 }
@@ -83,23 +114,56 @@ impl Tree {
 
     /// One-node tree shown from the very first frame of a scan (counters are patched in live).
     pub fn placeholder(root_name: &str) -> Tree {
-        Tree {
-            nodes: vec![Node {
-                name: root_name.to_string(),
-                parent: NONE,
-                children: Vec::new(),
-                size: 0,
-                alloc: 0,
-                files: 0,
-                dirs: 0,
-                modified: 0,
-                attrs: 0,
-                is_dir: true,
-                is_link: false,
-                scanning: true,
-            }],
-            live: Some(Box::default()),
-        }
+        let mut t = Tree { live: Some(Box::default()), ..Tree::default() };
+        t.push_node(root_name, Node { scanning: true, ..Node::blank(NONE, true) });
+        t
+    }
+
+    /// Empty tree with room for exactly `nodes` nodes, `name_bytes` bytes of names and `kids` child links.
+    pub fn with_capacity(nodes: usize, name_bytes: usize, kids: usize) -> Tree {
+        Tree { nodes: Vec::with_capacity(nodes), names: String::with_capacity(name_bytes), kids: Vec::with_capacity(kids), live: None }
+    }
+
+    /// Append a node (its name is copied into the shared name buffer) and return its id. The child
+    /// list starts empty; fill it with `set_children`.
+    pub fn push_node(&mut self, name: &str, mut node: Node) -> NodeId {
+        let id = self.nodes.len() as NodeId;
+        node.name_off = self.names.len() as u32;
+        node.name_len = name.len() as u32;
+        node.child_start = self.kids.len() as u32;
+        node.child_len = 0;
+        self.names.push_str(name);
+        self.nodes.push(node);
+        id
+    }
+
+    /// Replace the child list of `id` by `children` (appended at the end of the flat array; the
+    /// previous list becomes unused space).
+    pub fn set_children(&mut self, id: NodeId, children: &[NodeId]) {
+        let start = self.kids.len() as u32;
+        self.kids.extend_from_slice(children);
+        let n = &mut self.nodes[id as usize];
+        n.child_start = start;
+        n.child_len = children.len() as u32;
+    }
+
+    /// Rename a node (the new name is appended to the name buffer; the old one becomes unused space).
+    pub fn set_name(&mut self, id: NodeId, name: &str) {
+        let off = self.names.len() as u32;
+        self.names.push_str(name);
+        let n = &mut self.nodes[id as usize];
+        n.name_off = off;
+        n.name_len = name.len() as u32;
+    }
+
+    pub fn name(&self, id: NodeId) -> &str {
+        let n = &self.nodes[id as usize];
+        &self.names[n.name_off as usize..(n.name_off + n.name_len) as usize]
+    }
+
+    pub fn children(&self, id: NodeId) -> &[NodeId] {
+        let n = &self.nodes[id as usize];
+        &self.kids[n.child_start as usize..(n.child_start + n.child_len) as usize]
     }
 
     /// Files held directly by a directory: from the stream during a scan, from the retained file
@@ -109,7 +173,7 @@ impl Tree {
             return l.direct.get(id as usize).copied().unwrap_or_default();
         }
         let mut d = DirectFiles::default();
-        for &c in &self.get(id).children {
+        for &c in self.children(id) {
             let n = self.get(c);
             if !n.is_dir {
                 d.count += 1;
@@ -139,9 +203,8 @@ impl Tree {
         let mut parts = Vec::new();
         let mut cur = id;
         while cur != NONE {
-            let n = self.get(cur);
-            parts.push(n.name.as_str());
-            cur = n.parent;
+            parts.push(self.name(cur));
+            cur = self.get(cur).parent;
         }
         let mut p = PathBuf::new();
         for part in parts.iter().rev() {
@@ -155,9 +218,8 @@ impl Tree {
         let mut parts = Vec::new();
         let mut cur = id;
         while cur != NONE && cur != Self::ROOT {
-            let n = self.get(cur);
-            parts.push(n.name.as_str());
-            cur = n.parent;
+            parts.push(self.name(cur));
+            cur = self.get(cur).parent;
         }
         parts.reverse();
         parts
@@ -187,7 +249,13 @@ impl Tree {
         if parent == NONE {
             return;
         }
-        self.nodes[parent as usize].children.retain(|&c| c != id);
+        // Shift the tail left inside the parent's own range: no new list, so deleting many entries
+        // of one big folder never grows `kids`.
+        let (start, len) = (self.nodes[parent as usize].child_start as usize, self.nodes[parent as usize].child_len as usize);
+        if let Some(pos) = self.kids[start..start + len].iter().position(|&c| c == id) {
+            self.kids.copy_within(start + pos + 1..start + len, start + pos);
+            self.nodes[parent as usize].child_len -= 1;
+        }
         self.nodes[id as usize].parent = NONE;
         let (df, dd) = if is_dir { (files, dirs + 1) } else { (1, 0) };
         let mut cur = parent;
@@ -211,22 +279,28 @@ impl Tree {
         if parent == NONE {
             return None;
         }
-        let name = self.get(id).name.clone();
+        // The grafted root keeps the name of the node it replaces (same buffer range, no copy).
+        let (name_off, name_len) = (self.get(id).name_off, self.get(id).name_len);
         self.remove_subtree(id);
         let off = self.nodes.len() as NodeId;
+        let (name_shift, kid_shift) = (self.names.len() as u32, self.kids.len() as u32);
         for n in &mut sub.nodes {
             if n.parent != NONE {
                 n.parent += off;
             }
-            for c in &mut n.children {
-                *c += off;
-            }
+            n.name_off += name_shift;
+            n.child_start += kid_shift;
         }
-        sub.nodes[0].name = name;
+        self.names.push_str(&sub.names);
+        self.kids.extend(sub.kids.iter().map(|&c| c + off));
+        sub.nodes[0].name_off = name_off;
+        sub.nodes[0].name_len = name_len;
         sub.nodes[0].parent = parent;
         let (size, alloc, files, dirs) = (sub.nodes[0].size, sub.nodes[0].alloc, sub.nodes[0].files, sub.nodes[0].dirs + 1);
         self.nodes.extend(sub.nodes);
-        self.nodes[parent as usize].children.push(off);
+        let mut siblings = self.children(parent).to_vec();
+        siblings.push(off);
+        self.set_children(parent, &siblings);
         let mut cur = parent;
         while cur != NONE {
             let a = &mut self.nodes[cur as usize];
@@ -241,11 +315,7 @@ impl Tree {
 
     #[allow(dead_code)]
     pub fn find_child(&self, parent: NodeId, name: &str) -> Option<NodeId> {
-        self.get(parent)
-            .children
-            .iter()
-            .copied()
-            .find(|&c| self.get(c).name == name)
+        self.children(parent).iter().copied().find(|&c| self.name(c) == name)
     }
 }
 
@@ -370,7 +440,7 @@ mod tests {
         let a = tree.resolve_path(&["a"]).unwrap();
         let sub = scan_simple(&root.join("a")).tree;
         let new_a = tree.graft(a, sub).unwrap();
-        assert_eq!(tree.get(new_a).name, "a");
+        assert_eq!(tree.name(new_a), "a");
         assert_eq!(tree.get(new_a).parent, Tree::ROOT);
         let full = scan_simple(root).tree;
         let (g, f) = (tree.get(Tree::ROOT), full.get(Tree::ROOT));
@@ -389,46 +459,137 @@ mod tests {
         t.live = Some(Box::new(ls));
         assert_eq!(t.direct_files(0).count, 3);
         // final tree: derived from the retained file children (links to files count, dirs do not)
-        let file = |name: &str, parent, size, modified| Node { is_dir: false, size, alloc: size, modified, ..dir(name, parent, vec![]) };
-        let f = Tree { nodes: vec![dir("R", NONE, vec![1, 2, 3]), file("a", 0, 5, 7), file("b", 0, 6, 9), dir("d", 0, vec![])], ..Default::default() };
+        let file = |name: &str, parent, size, modified| (name.to_string(), Node { is_dir: false, size, alloc: size, modified, ..Node::blank(parent, false) }, vec![]);
+        let f = build(vec![dir("R", NONE, vec![1, 2, 3]), file("a", 0, 5, 7), file("b", 0, 6, 9), dir("d", 0, vec![])]);
         assert!(f.has_file_nodes());
         assert_eq!(f.direct_files(0), DirectFiles { count: 2, size: 11, alloc: 11, modified: 9 });
     }
 
-    fn dir(name: &str, parent: NodeId, children: Vec<NodeId>) -> Node {
-        Node {
-            name: name.into(),
-            parent,
-            children,
-            size: 0,
-            alloc: 0,
-            files: 0,
-            dirs: 0,
-            modified: 0,
-            attrs: 0,
-            is_dir: true,
-            is_link: false,
-            scanning: false,
+    type Spec = (String, Node, Vec<NodeId>);
+
+    fn dir(name: &str, parent: NodeId, children: Vec<NodeId>) -> Spec {
+        (name.to_string(), Node::blank(parent, true), children)
+    }
+
+    /// Build a tree by hand from (name, node, children) triples, in id order.
+    fn build(specs: Vec<Spec>) -> Tree {
+        let mut t = Tree::default();
+        for (name, node, _) in &specs {
+            t.push_node(name, node.clone());
         }
+        for (i, (_, _, kids)) in specs.iter().enumerate() {
+            t.set_children(i as NodeId, kids);
+        }
+        t
     }
 
     #[test]
     fn expanded_state_is_mapped_by_path_not_index() {
         // old: root -> [a -> [b], c]
-        let old = Tree { nodes: vec![dir("R", NONE, vec![1, 3]), dir("a", 0, vec![2]), dir("b", 1, vec![]), dir("c", 0, vec![])], ..Default::default() };
+        let old = build(vec![dir("R", NONE, vec![1, 3]), dir("a", 0, vec![2]), dir("b", 1, vec![]), dir("c", 0, vec![])]);
         // new snapshot rebuilt in another order, with an extra directory: root -> [z, c, a -> [b]]
-        let new = Tree {
-            nodes: vec![dir("R", NONE, vec![1, 2, 3]), dir("z", 0, vec![]), dir("c", 0, vec![]), dir("a", 0, vec![4]), dir("b", 3, vec![])],
-            ..Default::default()
-        };
+        let new = build(vec![dir("R", NONE, vec![1, 2, 3]), dir("z", 0, vec![]), dir("c", 0, vec![]), dir("a", 0, vec![4]), dir("b", 3, vec![])]);
         let expanded: HashSet<NodeId> = [0, 1, 2].into_iter().collect(); // R, a, b
         let mapped = remap_ids(&old, &new, &expanded);
         let want: HashSet<NodeId> = [0, 3, 4].into_iter().collect();
         assert_eq!(mapped, want);
         // a vanished directory is dropped instead of aliasing another node
-        let gone = Tree { nodes: vec![dir("R", NONE, vec![1]), dir("c", 0, vec![])], ..Default::default() };
+        let gone = build(vec![dir("R", NONE, vec![1]), dir("c", 0, vec![])]);
         let mapped = remap_ids(&old, &gone, &expanded);
         assert_eq!(mapped, [0].into_iter().collect());
         assert_eq!(old.name_path(2), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn removing_children_keeps_order_and_does_not_grow_the_child_array() {
+        let n = 50u32;
+        let mut specs = vec![dir("R", NONE, (1..=n).collect())];
+        specs.extend((1..=n).map(|i| dir(&format!("c{i}"), 0, vec![])));
+        let mut t = build(specs);
+        let before = t.kids.len();
+        for id in (1..=n).step_by(2) {
+            t.remove_subtree(id);
+        }
+        let want: Vec<NodeId> = (1..=n).filter(|i| i % 2 == 0).collect();
+        assert_eq!(t.children(0), want.as_slice());
+        assert_eq!(t.kids.len(), before);
+    }
+
+    #[test]
+    fn node_is_compact() {
+        assert!(std::mem::size_of::<Node>() <= 72, "Node is {} bytes", std::mem::size_of::<Node>());
+    }
+
+    #[test]
+    fn name_and_children_accessors() {
+        let t = build(vec![dir("R", NONE, vec![1, 2]), dir("alpha", 0, vec![]), dir("béta-日本", 0, vec![3]), dir("", 2, vec![])]);
+        assert_eq!(t.name(0), "R");
+        assert_eq!(t.name(1), "alpha");
+        assert_eq!(t.name(2), "béta-日本");
+        assert_eq!(t.name(3), "");
+        assert_eq!(t.children(0), &[1, 2]);
+        assert_eq!(t.children(1), &[] as &[NodeId]);
+        assert_eq!(t.children(2), &[3]);
+        assert_eq!(t.find_child(0, "béta-日本"), Some(2));
+        assert_eq!(t.find_child(2, ""), Some(3));
+        assert_eq!(t.find_child(0, "nope"), None);
+        assert_eq!(t.name_path(3), vec!["béta-日本", ""]);
+        assert_eq!(t.resolve_path(&["béta-日本", ""]), Some(3));
+        assert_eq!(t.path_of(2), PathBuf::from("R").join("béta-日本"));
+    }
+
+    #[test]
+    fn set_children_replaces_the_list() {
+        let mut t = build(vec![dir("R", NONE, vec![1, 2]), dir("a", 0, vec![]), dir("b", 0, vec![])]);
+        t.set_children(0, &[2]);
+        assert_eq!(t.children(0), &[2]);
+        t.set_children(0, &[]);
+        assert!(t.children(0).is_empty());
+        t.set_children(1, &[2, 1]);
+        assert_eq!(t.children(1), &[2, 1]);
+        assert_eq!(t.children(2), &[] as &[NodeId]);
+    }
+
+    #[test]
+    fn remove_then_graft_round_trips_with_unicode_names() {
+        use crate::scan::scan_simple;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("dossier é/日本")).unwrap();
+        std::fs::create_dir_all(root.join("z")).unwrap();
+        std::fs::write(root.join("dossier é/日本/ñ.bin"), vec![1u8; 700]).unwrap();
+        std::fs::write(root.join("dossier é/top.txt"), vec![1u8; 30]).unwrap();
+        std::fs::write(root.join("z/w.bin"), vec![1u8; 9]).unwrap();
+        let mut tree = scan_simple(root).tree;
+        let dir_id = tree.resolve_path(&["dossier é"]).unwrap();
+        tree.remove_subtree(dir_id);
+        assert!(tree.resolve_path(&["dossier é"]).is_none());
+        assert_eq!(tree.get(Tree::ROOT).files, 1);
+        let sub = scan_simple(&root.join("dossier é")).tree;
+        let new_id = tree.graft(dir_id, sub);
+        // the removed node is detached (parent NONE), so grafting it again is refused
+        assert!(new_id.is_none());
+        // graft over a live node instead: rescan `z` and graft the unicode folder's content in place
+        let z = tree.resolve_path(&["z"]).unwrap();
+        std::fs::write(root.join("z/extra.bin"), vec![1u8; 100]).unwrap();
+        let sub = scan_simple(&root.join("z")).tree;
+        let nz = tree.graft(z, sub).unwrap();
+        assert_eq!(tree.name(nz), "z");
+        assert_eq!(tree.resolve_path(&["z", "extra.bin"]).map(|i| tree.get(i).size), Some(100));
+        // full round trip against a fresh rescan
+        let mut tree = scan_simple(root).tree;
+        let a = tree.resolve_path(&["dossier é"]).unwrap();
+        let sub = scan_simple(&root.join("dossier é")).tree;
+        let na = tree.graft(a, sub).unwrap();
+        assert_eq!(tree.name(na), "dossier é");
+        let full = scan_simple(root).tree;
+        let (g, f) = (tree.get(Tree::ROOT), full.get(Tree::ROOT));
+        assert_eq!((g.size, g.alloc, g.files, g.dirs), (f.size, f.alloc, f.files, f.dirs));
+        assert_eq!(tree.resolve_path(&["dossier é", "日本", "ñ.bin"]).map(|i| tree.get(i).size), Some(700));
+        let mut names_g: Vec<&str> = tree.children(Tree::ROOT).iter().map(|&c| tree.name(c)).collect();
+        let mut names_f: Vec<&str> = full.children(Tree::ROOT).iter().map(|&c| full.name(c)).collect();
+        names_g.sort();
+        names_f.sort();
+        assert_eq!(names_g, names_f);
     }
 }

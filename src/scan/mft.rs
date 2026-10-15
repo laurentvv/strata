@@ -263,26 +263,30 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
             }
         }
     }
-    let mut tree = Tree::default();
+    // Exact reservation: every kept record becomes one node, one child link and one name.
+    let (mut n_nodes, mut n_names) = (1usize, volume_root.len());
+    for list in kids.values() {
+        n_nodes += list.len();
+        for &c in list {
+            n_names += recs.get(c as usize).and_then(|r| r.as_ref()).and_then(|r| r.name.as_ref()).map_or(0, |n| n.len());
+        }
+    }
+    let mut tree = Tree::with_capacity(n_nodes, n_names, n_nodes);
     let root_rec = recs.get(ROOT_RECORD as usize).and_then(|r| r.as_ref());
-    tree.nodes.push(Node {
-        name: volume_root.to_string(),
-        parent: NONE,
-        children: vec![],
-        size: 0,
-        alloc: 0,
-        files: 0,
-        dirs: 0,
-        modified: root_rec.and_then(|r| r.modified).unwrap_or(0),
-        attrs: root_rec.and_then(|r| r.attrs).unwrap_or(0),
-        is_dir: true,
-        is_link: false,
-        scanning: false,
-    });
+    tree.push_node(
+        volume_root,
+        Node {
+            modified: root_rec.and_then(|r| r.modified).unwrap_or(0),
+            attrs: root_rec.and_then(|r| r.attrs).unwrap_or(0),
+            ..Node::blank(NONE, true)
+        },
+    );
     let mut visited = vec![false; recs.len()];
     let mut stack: Vec<(u64, NodeId)> = vec![(ROOT_RECORD, 0)];
     while let Some((rn, nid)) = stack.pop() {
         let Some(list) = kids.get(&rn) else { continue };
+        // The children of one directory get consecutive ids and are appended to the flat child array together.
+        let start = tree.kids.len();
         for &c in list {
             let Some(Some(r)) = recs.get(c as usize) else { continue };
             if std::mem::replace(&mut visited[c as usize], true) {
@@ -290,27 +294,24 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
             }
             let attrs = r.attrs.unwrap_or(0);
             let is_link = attrs & REPARSE != 0 && r.is_dir;
-            let id = tree.nodes.len() as NodeId;
             let n = Node {
-                name: r.name.clone().unwrap_or_default(),
-                parent: nid,
-                children: vec![],
                 size: if r.is_dir { 0 } else { r.size.unwrap_or(0) },
                 alloc: if r.is_dir { 0 } else { r.alloc.unwrap_or(0) },
-                files: 0,
-                dirs: 0,
                 modified: r.modified.unwrap_or(0),
                 attrs,
-                is_dir: r.is_dir,
                 is_link,
-                scanning: false,
+                ..Node::blank(nid, r.is_dir)
             };
-            tree.nodes.push(n);
-            tree.nodes[nid as usize].children.push(id);
+            let id = tree.push_node(r.name.as_deref().unwrap_or(""), n);
+            tree.kids.push(id);
             if r.is_dir && !is_link {
                 stack.push((c, id));
             }
         }
+        let count = (tree.kids.len() - start) as u32;
+        let p = &mut tree.nodes[nid as usize];
+        p.child_start = start as u32;
+        p.child_len = count;
     }
     // Aggregate bottom-up: parents always have a smaller index than their children.
     for i in (1..tree.nodes.len()).rev() {
@@ -639,7 +640,7 @@ mod tests {
         recs[3] = parsed(file_rec(5, "$Volume", 77, 0)); // metadata: skipped
         let t = build_tree(recs, "C:\\");
         let root = t.root().unwrap();
-        assert_eq!(root.name, "C:\\");
+        assert_eq!(t.name(Tree::ROOT), "C:\\");
         assert_eq!((root.size, root.files, root.dirs), (4107, 3, 2));
         let docs = t.find_child(0, "docs").unwrap();
         assert_eq!((t.get(docs).size, t.get(docs).files, t.get(docs).dirs), (107, 2, 1));

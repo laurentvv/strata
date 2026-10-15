@@ -51,7 +51,7 @@ fn walk_sorted(tree: &Tree, root: NodeId, max_depth: usize, dirs_only: bool) -> 
             continue;
         }
         let mut kids: Vec<NodeId> =
-            tree.get(id).children.iter().copied().filter(|&c| !dirs_only || tree.get(c).is_dir).collect();
+            tree.children(id).iter().copied().filter(|&c| !dirs_only || tree.get(c).is_dir).collect();
         kids.sort_by(|&a, &b| tree.get(b).size.cmp(&tree.get(a).size).then(a.cmp(&b)));
         for &c in kids.iter().rev() {
             stack.push((c, depth + 1));
@@ -94,7 +94,7 @@ pub fn write_csv<W: Write>(tree: &Tree, root: NodeId, mut w: W) -> io::Result<()
 fn json_node(tree: &Tree, id: NodeId, depth: usize, max_depth: usize) -> serde_json::Value {
     let n = tree.get(id);
     let mut o = serde_json::json!({
-        "name": n.name,
+        "name": tree.name(id),
         "type": kind(tree, id),
         "size": n.size,
         "allocated": n.alloc,
@@ -103,7 +103,7 @@ fn json_node(tree: &Tree, id: NodeId, depth: usize, max_depth: usize) -> serde_j
         "modified": n.modified,
     });
     if n.is_dir && depth < max_depth {
-        let mut kids = n.children.clone();
+        let mut kids = tree.children(id).to_vec();
         kids.sort_by(|&a, &b| tree.get(b).size.cmp(&tree.get(a).size).then(a.cmp(&b)));
         o["children"] = kids.into_iter().map(|c| json_node(tree, c, depth + 1, max_depth)).collect();
     }
@@ -158,7 +158,7 @@ pub fn write_html<W: Write>(tree: &Tree, root: NodeId, max_depth: usize, mut w: 
             w,
             "<tr><td class=\"n\" style=\"padding-left:{}px\">{}</td><td>{}</td><td>{}</td><td class=\"n\"><span class=\"box\"><span class=\"bar\" style=\"width:{:.0}%\"></span></span>{:.1}%</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             8 + depth * 16,
-            esc(&n.name),
+            esc(tree.name(id)),
             format_bytes(n.size),
             format_bytes(n.alloc),
             pct.clamp(0.0, 100.0),

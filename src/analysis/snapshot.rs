@@ -58,16 +58,16 @@ impl Snapshot {
                 continue;
             }
             dirs.push(SnapDir { path: rel.clone(), size: n.size, alloc: n.alloc, files: n.files });
-            for &c in &n.children {
+            for &c in tree.children(id) {
                 let child = tree.get(c);
                 if child.is_dir && !child.is_link {
-                    let p = if rel.is_empty() { child.name.clone() } else { format!("{rel}/{}", child.name) };
+                    let p = if rel.is_empty() { tree.name(c).to_string() } else { format!("{rel}/{}", tree.name(c)) };
                     stack.push((c, p));
                 }
             }
         }
         dirs.sort_by(|a, b| a.path.cmp(&b.path));
-        Snapshot { version: 1, root: tree.get(Tree::ROOT).name.clone(), taken, dirs }
+        Snapshot { version: 1, root: tree.name(Tree::ROOT).to_string(), taken, dirs }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -191,7 +191,7 @@ fn append_point(dir: &Path, root: &str, p: HistoryPoint) {
 /// Compare `tree` with the newest stored snapshot of its root (if any), then store `tree` as a
 /// new snapshot and keep the history to 20 files. Returns the old snapshot time and the changes.
 pub fn record_and_compare(dir: &Path, tree: &Tree, now: i64) -> Option<(i64, Vec<DirDelta>)> {
-    let root = tree.get(Tree::ROOT).name.clone();
+    let root = tree.name(Tree::ROOT).to_string();
     let new = Snapshot::from_tree(tree, now);
     let previous = history_for(dir, &root).into_iter().rev().find_map(|p| Snapshot::load(&p).ok());
     let result = previous.map(|old| (old.taken, diff(&old, &new)));
@@ -265,7 +265,7 @@ mod tests {
         let (taken, changes) = record_and_compare(hist.path(), &t2, 200).expect("second scan compares");
         assert_eq!(taken, 100);
         assert_eq!(changes.iter().find(|c| c.path == "a").unwrap().delta(), 500);
-        assert_eq!(history_for(hist.path(), &t2.get(Tree::ROOT).name).len(), 2);
+        assert_eq!(history_for(hist.path(), t2.name(Tree::ROOT)).len(), 2);
         // A third identical scan reports no change.
         let t3 = scan_simple(data.path()).tree;
         assert!(record_and_compare(hist.path(), &t3, 300).unwrap().1.is_empty());
@@ -277,7 +277,7 @@ mod tests {
         let hist = tempfile::tempdir().unwrap();
         write(&data.path().join("a.bin"), 100);
         let root = scan_simple(data.path()).tree;
-        let name = root.get(Tree::ROOT).name.clone();
+        let name = root.name(Tree::ROOT).to_string();
         assert!(history_points(hist.path(), &name).is_empty());
         record_and_compare(hist.path(), &root, 10);
         write(&data.path().join("b.bin"), 900);
