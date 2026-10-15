@@ -3,7 +3,7 @@
 use crate::analysis::types::files_below;
 use crate::scan::{NodeId, Tree};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,38 @@ pub fn size_candidates(tree: &Tree, root: NodeId, min_size: u64) -> Vec<(u64, Ve
         .collect();
     v.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
     v
+}
+
+/// Identity of the file behind a path: volume and file index. Hard links share it.
+#[cfg(windows)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    let f = File::open(path).ok()?;
+    // SAFETY: the handle is valid for the lifetime of `f`; the struct is plain data filled by the call.
+    let info = unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) == 0 {
+            return None;
+        }
+        info
+    };
+    Some((info.dwVolumeSerialNumber as u64, ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64))
+}
+
+#[cfg(not(windows))]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.dev(), m.ino()))
+}
+
+/// One path per underlying file: hard links of the same file are not copies (deleting one frees
+/// nothing), so only the first name of each is kept. Paths whose identity cannot be read stay.
+fn distinct_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let ids: Vec<Option<(u64, u64)>> = paths.par_iter().map(|p| file_id(p)).collect();
+    let mut seen = HashSet::new();
+    paths.into_iter().zip(ids).filter(|(_, id)| id.is_none_or(|i| seen.insert(i))).map(|(p, _)| p).collect()
 }
 
 fn hash_file(path: &Path, limit: Option<u64>) -> std::io::Result<[u8; 32]> {
@@ -97,6 +129,15 @@ pub fn find_duplicates_in(
     for (size, paths) in candidates {
         if cancel.load(Ordering::Relaxed) {
             return None;
+        }
+        let mut paths = paths;
+        paths.sort();
+        let before = paths.len();
+        let paths = distinct_files(paths);
+        done.fetch_add((before - paths.len()) as u64, Ordering::Relaxed); // progress counts them as handled
+        if paths.len() < 2 {
+            done.fetch_add(paths.len() as u64, Ordering::Relaxed);
+            continue;
         }
         // Files that fit the partial window need only one (full) pass.
         let stage1 = if size <= PARTIAL_BYTES { vec![paths] } else { regroup(paths, Some(PARTIAL_BYTES), cancel, done)? };
@@ -180,6 +221,37 @@ mod tests {
     fn w(p: &Path, data: &[u8]) {
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, data).unwrap();
+    }
+
+    #[test]
+    fn hard_links_are_not_duplicates_but_real_copies_still_are() {
+        let d = tempfile::tempdir().unwrap();
+        let data = vec![9u8; 5000];
+        w(&d.path().join("a/one.bin"), &data);
+        w(&d.path().join("c/copy.bin"), &data);
+        if fs::hard_link(d.path().join("a/one.bin"), d.path().join("b_link.bin")).is_err() {
+            return; // this file system has no hard links
+        }
+        let tree = scan_simple(d.path()).tree;
+        let g = find_duplicates(&tree, Tree::ROOT, 1, &AtomicBool::new(false), &AtomicU64::new(0)).unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].paths.len(), 2, "one name of the hard-linked file plus the real copy: {:?}", g[0].paths);
+        assert_eq!(g[0].wasted(), 5000);
+        assert!(g[0].paths.iter().any(|p| p.ends_with("copy.bin")));
+    }
+
+    #[test]
+    fn files_that_are_only_hard_links_form_no_group() {
+        let d = tempfile::tempdir().unwrap();
+        w(&d.path().join("x/orig.bin"), &[1u8; 3000]);
+        if fs::hard_link(d.path().join("x/orig.bin"), d.path().join("y_link.bin")).is_err() {
+            return;
+        }
+        let tree = scan_simple(d.path()).tree;
+        let done = AtomicU64::new(0);
+        let g = find_duplicates(&tree, Tree::ROOT, 1, &AtomicBool::new(false), &done).unwrap();
+        assert!(g.is_empty());
+        assert_eq!(done.load(Ordering::Relaxed), 2, "skipped names still count for the progress");
     }
 
     #[test]
