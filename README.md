@@ -21,7 +21,7 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   drag a folder onto the window to scan it.
 - **Restart as administrator** from the app (banner after "access denied" folders, or always).
 - **Command line** for scripts: `strata --cli PATH --export report.csv|json|html --changes --cleanup`;
-  `--fast` reads the NTFS Master File Table of a whole drive (administrator only, experimental).
+  `--fast` reads the NTFS Master File Table of a whole drive (administrator only).
 - English and French interface; light and dark theme.
 
 | | |
@@ -43,7 +43,7 @@ renders one frame and exits (this is how the pictures above are made).
 
 | Path | Role |
 |---|---|
-| `src/scan/` | parallel walker (rayon), arena tree, live snapshots, NTFS MFT reader (experimental) |
+| `src/scan/` | parallel walker (rayon), arena tree, live snapshots, NTFS MFT reader (opt-in) |
 | `src/analysis/` | file types, filters, duplicates, snapshots and history, clean-up insights |
 | `src/ui/` | egui app: ribbon, tree table, map, views, theme, painter glyphs |
 | `src/spec.rs` | menu bar and keyboard shortcut table |
@@ -55,7 +55,11 @@ Settings, scan history and snapshots live in `%APPDATA%\strata`.
 
 ## Status and limits
 
-- The NTFS MFT fast scan is only tested on synthetic records; it falls back to the normal walker.
+- The NTFS fast scan ("Fast NTFS scan (admin)" in the ribbon, `--fast` on the command line) needs administrator
+  rights and a whole drive, is off by default and falls back to the normal walker with a message. Checked against
+  the normal scan on a real 252 GB volume (95,078 files): same sizes and folder count, every hard link listed
+  under its own name, 3 more files (in `System Volume Information`, which the normal scan may not read), and 1.2 s
+  instead of 79 s on a cold cache. Compare it on your own drives with `tools/validate_mft.ps1`.
 - Windows is the target platform. Linux builds and passes its tests; macOS is not maintained.
 - Memory for `C:\Windows` (measured with `tools/measure.ps1`): about 230 MB peak and about 160 MB once the
   scan is done (110 MB of that is the window itself); about 1 GB peak for a 3.75 M-file drive.
