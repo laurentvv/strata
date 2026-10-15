@@ -686,7 +686,8 @@ impl App {
         ctx.set_visuals(visuals_for(dark));
         // Labels are not selectable: hovering them must not show the text-selection cursor.
         ctx.all_styles_mut(|style| style.interaction.selectable_labels = false);
-        let view = opts.view.unwrap_or(st.view);
+        // The last view is restored, except one that has nothing to show while the scan of the next folder runs.
+        let view = opts.view.unwrap_or(if st.view.needs_finished_scan() { ViewKind::Tree } else { st.view });
         Self {
             path_text: if st.last_path.is_empty() { first } else { st.last_path.clone() },
             view,
@@ -801,6 +802,10 @@ impl App {
             return;
         }
         self.status = format!("{} {} ...", tr("Scanning"), root.display());
+        // Watch the scan fill the tree, not an empty analysis page (a screenshot keeps the view it was asked for).
+        if self.shot.is_none() && self.view.needs_finished_scan() {
+            self.view = ViewKind::Tree;
+        }
         self.notice.clear();
         self.excludes_changed = false;
         self.settings.last_path = root.to_string_lossy().into_owned();

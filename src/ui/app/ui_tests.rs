@@ -732,3 +732,36 @@ fn the_system_space_view_lists_what_was_found_and_copies_the_commands() {
     assert_eq!(h.state().system_copied.as_deref(), Some("vssadmin list shadowstorage"));
     assert!(h.query_by_label("Copied").is_some(), "the click is acknowledged");
 }
+
+#[test]
+fn a_scan_never_starts_in_a_view_that_waits_for_the_scan_to_end() {
+    let _g = lock();
+    let fx = fixture();
+    let ctx = egui::Context::default();
+    // The last session ended in the Clean-up view: the next launch opens on the tree.
+    let st = Settings { language: "en".into(), view: ViewKind::Cleanup, ..Settings::default() };
+    let app = App::new(&ctx, st.clone(), &RunOptions::default());
+    assert_eq!(app.view, ViewKind::Tree);
+    // A view that works while scanning is remembered as before.
+    let app = App::new(&ctx, Settings { view: ViewKind::Treemap, ..st.clone() }, &RunOptions::default());
+    assert_eq!(app.view, ViewKind::Treemap);
+    // Asked for on the command line, it is honoured.
+    let app = App::new(&ctx, st.clone(), &RunOptions { view: Some(ViewKind::Cleanup), ..RunOptions::default() });
+    assert_eq!(app.view, ViewKind::Cleanup);
+    // Starting a scan from such a view switches to the tree; the others stay put.
+    for (from, to) in [(ViewKind::Cleanup, ViewKind::Tree), (ViewKind::System, ViewKind::Tree), (ViewKind::Age, ViewKind::Tree), (ViewKind::Duplicates, ViewKind::Tree), (ViewKind::Chart, ViewKind::Chart)] {
+        let mut app = App::new(&ctx, Settings { language: "en".into(), ..Settings::default() }, &RunOptions::default());
+        app.persist_enabled = false;
+        app.settings_path = None;
+        app.path_text = fx.root.to_string_lossy().into_owned();
+        app.view = from;
+        app.start_scan();
+        assert_eq!(app.view, to, "starting a scan from {from:?}");
+    }
+    // A screenshot keeps the view it was asked for.
+    let opts = RunOptions { screenshot: Some(PathBuf::from("never-written.png")), view: Some(ViewKind::Cleanup), ..RunOptions::default() };
+    let mut app = App::new(&ctx, Settings::default(), &opts);
+    app.path_text = fx.root.to_string_lossy().into_owned();
+    app.start_scan();
+    assert_eq!(app.view, ViewKind::Cleanup);
+}
