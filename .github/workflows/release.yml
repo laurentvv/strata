@@ -1,0 +1,80 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the Windows release on a GitHub runner (so the binary carries no
+# personal build paths) and creates a DRAFT release: nothing is public until it is published by hand.
+# Running the workflow manually only builds the files and keeps them as a workflow artifact.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked
+      - name: Build release
+        shell: pwsh
+        run: |
+          # RUSTFLAGS replaces .cargo/config.toml, so the static C runtime is requested here too.
+          # Paths are remapped in both separator styles (build scripts print forward slashes).
+          $flags = @('-C', 'target-feature=+crt-static')
+          $maps = @{
+            $env:GITHUB_WORKSPACE = '.'
+            "$env:USERPROFILE\.cargo" = 'cargo'
+            "$env:USERPROFILE\.rustup" = 'rustup'
+          }
+          foreach ($from in $maps.Keys) {
+            $flags += "--remap-path-prefix=$from=$($maps[$from])"
+            $flags += "--remap-path-prefix=$($from.Replace('\', '/'))=$($maps[$from])"
+          }
+          $env:RUSTFLAGS = $flags -join ' '
+          cargo build --release --locked
+      - name: Check the binary
+        shell: pwsh
+        run: |
+          $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('target\release\strata.exe'))
+          $pattern = '(?i)(runneradmin|[A-Z]:[\\/]a[\\/]strata|[\\/]\.cargo[\\/]registry|[\\/]\.rustup[\\/]toolchains)[^\0"]{0,60}'
+          $hits = [regex]::Matches($text, $pattern) | ForEach-Object Value | Sort-Object -Unique
+          if ($hits) { $hits; throw 'build-machine paths are embedded in strata.exe' }
+          if ($text -match '(?i)vcruntime140') { throw 'strata.exe still needs the Visual C++ runtime DLL' }
+          'No build-machine paths found, no Visual C++ runtime dependency.'
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $name = "strata-$tag-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target\release\strata.exe, README.md, LICENSE $name
+          # An empty marker next to the program switches it to portable mode (data in strata-data\).
+          Set-Content -Path "$name\strata.portable.example" -Value 'Rename this file to strata.portable to keep settings and scan history next to strata.exe.'
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          "ASSET=$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          "SHA256 $hash"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strata-windows-x64
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+      - name: Create the draft release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = if (Test-Path RELEASE_NOTES.md) { @('--notes-file', 'RELEASE_NOTES.md') } else { @('--generate-notes') }
+          gh release create $env:GITHUB_REF_NAME --draft --title "Strata $env:GITHUB_REF_NAME" @notes $env:ASSET "$env:ASSET.sha256"
