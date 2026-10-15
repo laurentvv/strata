@@ -249,8 +249,13 @@ impl Tree {
         if parent == NONE {
             return;
         }
-        let rest: Vec<NodeId> = self.children(parent).iter().copied().filter(|&c| c != id).collect();
-        self.set_children(parent, &rest);
+        // Shift the tail left inside the parent's own range: no new list, so deleting many entries
+        // of one big folder never grows `kids`.
+        let (start, len) = (self.nodes[parent as usize].child_start as usize, self.nodes[parent as usize].child_len as usize);
+        if let Some(pos) = self.kids[start..start + len].iter().position(|&c| c == id) {
+            self.kids.copy_within(start + pos + 1..start + len, start + pos);
+            self.nodes[parent as usize].child_len -= 1;
+        }
         self.nodes[id as usize].parent = NONE;
         let (df, dd) = if is_dir { (files, dirs + 1) } else { (1, 0) };
         let mut cur = parent;
@@ -493,6 +498,21 @@ mod tests {
         let mapped = remap_ids(&old, &gone, &expanded);
         assert_eq!(mapped, [0].into_iter().collect());
         assert_eq!(old.name_path(2), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn removing_children_keeps_order_and_does_not_grow_the_child_array() {
+        let n = 50u32;
+        let mut specs = vec![dir("R", NONE, (1..=n).collect())];
+        specs.extend((1..=n).map(|i| dir(&format!("c{i}"), 0, vec![])));
+        let mut t = build(specs);
+        let before = t.kids.len();
+        for id in (1..=n).step_by(2) {
+            t.remove_subtree(id);
+        }
+        let want: Vec<NodeId> = (1..=n).filter(|i| i % 2 == 0).collect();
+        assert_eq!(t.children(0), want.as_slice());
+        assert_eq!(t.kids.len(), before);
     }
 
     #[test]
