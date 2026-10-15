@@ -839,29 +839,38 @@ mod tests {
                 put(&d.join("inner"), &format!("g{j}.txt"), 7);
             }
         }
-        let progress = Progress::default();
-        let cancel = AtomicBool::new(false);
-        let done = AtomicBool::new(false);
-        let res = std::thread::scope(|s| {
-            s.spawn(|| {
-                while !done.load(Ordering::Relaxed) && progress.dirs.load(Ordering::Relaxed) < 20 {
-                    std::thread::yield_now();
-                }
-                cancel.store(true, Ordering::Relaxed);
+        // The canceller thread races with a very fast scan; retry until a scan really was cancelled
+        // (a finished scan is still checked for consistency each time).
+        let mut cancelled_once = false;
+        for _ in 0..40 {
+            let progress = Progress::default();
+            let cancel = AtomicBool::new(false);
+            let done = AtomicBool::new(false);
+            let res = std::thread::scope(|s| {
+                s.spawn(|| {
+                    while !done.load(Ordering::Relaxed) && progress.dirs.load(Ordering::Relaxed) < 5 {
+                        std::thread::yield_now();
+                    }
+                    cancel.store(true, Ordering::Relaxed);
+                });
+                let r = scan_blocking(tmp.path(), &progress, &cancel, &[]);
+                done.store(true, Ordering::Relaxed);
+                r
             });
-            let r = scan_blocking(tmp.path(), &progress, &cancel, &[]);
-            done.store(true, Ordering::Relaxed);
-            r
-        });
-        assert!(res.cancelled);
-        check_tree(&res.tree);
-        let full = 200 * 20u64;
-        assert!(res.tree.get(Tree::ROOT).files <= full);
-        // every name resolves and parents/children agree
-        for id in 0..res.tree.nodes.len() as NodeId {
-            let _ = res.tree.name(id);
-            assert!(res.tree.path_of(id).starts_with(tmp.path()));
+            check_tree(&res.tree);
+            let full = 200 * 20u64;
+            assert!(res.tree.get(Tree::ROOT).files <= full);
+            // every name resolves and parents/children agree
+            for id in 0..res.tree.nodes.len() as NodeId {
+                let _ = res.tree.name(id);
+                assert!(res.tree.path_of(id).starts_with(tmp.path()));
+            }
+            if res.cancelled {
+                cancelled_once = true;
+                break;
+            }
         }
+        assert!(cancelled_once, "no scan was cancelled in 40 attempts");
     }
 
     #[test]

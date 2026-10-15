@@ -1,6 +1,8 @@
 mod chrome;
 mod dialogs;
 mod ribbon;
+#[cfg(test)]
+mod ui_tests;
 
 use self::chrome::Cmd;
 use super::assets;
@@ -2707,6 +2709,7 @@ impl App {
         let name = d.text.trim().to_string();
         if !valid_file_name(&name) {
             d.err = tr("Invalid name");
+            d.focused = false; // Enter took the focus away: ask for it again so a second Enter works
             self.name_dialog = Some(d);
             return;
         }
@@ -2715,6 +2718,7 @@ impl App {
                 Ok(()) => self.start_sub_scan(d.id),
                 Err(e) => {
                     d.err = e.to_string();
+                    d.focused = false;
                     self.name_dialog = Some(d);
                 }
             }
@@ -2728,6 +2732,7 @@ impl App {
                 }
                 Err(e) => {
                     d.err = e.to_string();
+                    d.focused = false;
                     self.name_dialog = Some(d);
                 }
             }
@@ -2967,6 +2972,14 @@ fn open_in_explorer(path: &std::path::Path) {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(ui);
+    }
+}
+
+impl App {
+    /// One frame of the whole window; separate from `eframe::App::ui` so tests can drive it
+    /// without an `eframe::Frame`.
+    fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.take_screenshot_event(&ctx);
         self.apply_settings(&ctx);
