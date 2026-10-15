@@ -33,4 +33,5 @@ wingetcreate new https://github.com/laurentvv/strata/releases/download/v0.1.0/st
 `wingetcreate` fills the manifest (the files in `installer/winget` show the expected shape, identifier
 `LaurentVolff.Strata`), validates it and opens the pull request from your GitHub account. Later versions:
 `wingetcreate update LaurentVolff.Strata --version <new> --urls <new msi url> --submit`.
-The program is unsigned: SmartScreen shows "unknown publisher" until it is signed or has built up a reputation.
+The program is unsigned: SmartScreen shows "unknown publisher" until it is signed or has built up a reputation;
+the options for signing it are in [SIGNING.md](SIGNING.md).
