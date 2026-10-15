@@ -257,3 +257,137 @@ fn a_double_click_on_a_file_type_shows_only_those_files_in_the_tree() {
     assert!(h.state().show_filters, "the filter bar is shown");
     assert!(h.state().filter_set.is_some(), "the tree is filtered");
 }
+
+/// Texts that were drawn partly outside the rectangle they are clipped to (cut off on screen).
+fn clipped_texts(output: &egui::FullOutput) -> Vec<String> {
+    fn walk(shape: &egui::epaint::Shape, clip: egui::Rect, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| walk(s, clip, out)),
+            egui::epaint::Shape::Text(t) => {
+                let bounds = t.galley.rect.translate(t.pos.to_vec2());
+                let tolerance = 1.0;
+                if !t.galley.text().trim().is_empty() && !clip.expand(tolerance).contains_rect(bounds) {
+                    out.push(format!("{:?} (text {:?}, clip {:?})", t.galley.text(), bounds, clip));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in &output.shapes {
+        walk(&clipped.shape, clipped.clip_rect, &mut out);
+    }
+    out
+}
+
+/// Run a few frames of a fresh app in `language` at `size` and return the last frame's output.
+fn frames(language: &str, size: egui::Vec2, setup: impl FnOnce(&mut App)) -> egui::FullOutput {
+    let ctx = egui::Context::default();
+    let st = Settings { language: language.into(), show_map: false, ..Settings::default() };
+    let mut app = App::new(&ctx, st, &RunOptions::default());
+    app.persist_enabled = false;
+    app.settings_path = None;
+    setup(&mut app);
+    let mut last = None;
+    for i in 0..4 {
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)), time: Some(i as f64 * 0.1), ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear(); // nothing renders these frames: drop the texture uploads on purpose
+        last = Some(out);
+    }
+    last.unwrap()
+}
+
+#[test]
+fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
+    let _g = lock();
+    ribbon::MISSING_HINTS.with(|m| m.borrow_mut().clear());
+    let mut problems = Vec::new();
+    for lang in ["en", "fr"] {
+        // The default window width (1200): every ribbon tab must fit without scrolling.
+        for tab in 0..=5usize {
+            let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.ribbon_tab = tab);
+            problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] ribbon tab {tab}: {t}")));
+        }
+        let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_options = true);
+        problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] options window: {t}")));
+        let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_about = true);
+        problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] about window: {t}")));
+    }
+    assert!(problems.is_empty(), "cut-off texts:
+{}", problems.join("
+"));
+    let missing = ribbon::MISSING_HINTS.with(|m| m.borrow().clone());
+    assert!(missing.is_empty(), "ribbon buttons without an explanation: {missing:?}");
+}
+
+#[test]
+fn an_excluded_folder_can_be_seen_and_brought_back() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    let p = center_of(&h, "d2");
+    click_at(&mut h, p, PointerButton::Primary);
+    h.key_press_modifiers(egui::Modifiers { ctrl: true, shift: true, command: true, ..Default::default() }, Key::X);
+    h.run_steps(4);
+    assert_eq!(h.state().excludes, vec![fx.root.join("d2")], "the folder is excluded");
+    assert!(h.query_by_label("d2").is_none(), "and gone from the tree");
+    assert!(h.state().notice.contains("d2"), "the status says what happened: {:?}", h.state().notice);
+
+    // The status bar keeps a visible entry that opens the list...
+    let link = center_of(&h, "1 Excluded");
+    click_at(&mut h, link, PointerButton::Primary);
+    assert!(h.state().show_options, "the excluded counter opens the options");
+    // ...where the folder can be restored, with a way to scan again.
+    let restore = center_of(&h, "Restore");
+    click_at(&mut h, restore, PointerButton::Primary);
+    assert!(h.state().excludes.is_empty());
+    assert!(h.query_by_label("Rescan now").is_some(), "a rescan is offered");
+}
+
+#[test]
+fn parent_folder_selects_the_parent_in_the_tree() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    let p = center_of(&h, "d3");
+    click_at(&mut h, p, PointerButton::Primary);
+    let d3 = node_named(&h, "d3");
+    assert_eq!(h.state().selected, Some(d3));
+    assert!(h.state().can_go_up());
+    let ctx = h.ctx.clone();
+    h.state_mut().run_cmd(&ctx, Cmd::ParentFolder);
+    h.run_steps(2);
+    assert_eq!(h.state().selected, Some(Tree::ROOT), "the parent of d3 is the scanned folder");
+    assert!(h.state().handle.is_none(), "no new scan was started");
+}
+
+#[test]
+fn labels_are_not_selectable_so_the_cursor_stays_an_arrow() {
+    let _g = lock();
+    let ctx = egui::Context::default();
+    let _app = App::new(&ctx, Settings { language: "en".into(), ..Settings::default() }, &RunOptions::default());
+    assert!(!ctx.style_of(egui::Theme::Dark).interaction.selectable_labels, "selectable labels show the text-selection cursor");
+}
+
+#[test]
+fn ribbon_captions_are_only_ever_broken_between_words() {
+    let _g = lock();
+    let ctx = egui::Context::default();
+    for lang in ["en", "fr"] {
+        let _app = App::new(&ctx, Settings { language: lang.into(), ..Settings::default() }, &RunOptions::default());
+        let font = egui::FontId::proportional(11.0);
+        let mut bad = Vec::new();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            for (caption, _) in ribbon::HINTS {
+                let label = tr(caption);
+                let lines = ribbon::split_caption(ui, &label, &font, 60.0);
+                if lines.len() > 2 || lines.join(" ") != label {
+                    bad.push(format!("{label:?} -> {lines:?}"));
+                }
+            }
+        });
+        out.textures_delta.clear();
+        assert!(bad.is_empty(), "[{lang}] captions broken inside a word or in too many lines: {bad:#?}");
+    }
+}

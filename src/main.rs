@@ -48,7 +48,7 @@ Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
                                             headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders;
                                             --fast reads the NTFS Master File Table of a whole drive (administrator only)
        strata --version
-       strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N]
+       strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--dialog options|about]
                       [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit";
 
 fn main() {

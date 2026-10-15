@@ -46,7 +46,7 @@ cargo run --release -- --cli PATH -d 3   # headless tree
 cargo test                               # 109 tests
 ```
 
-Developer flags: `--screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--lang fr] PATH`
+Developer flags: `--screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--dialog options|about] [--lang fr] PATH`
 renders one frame and exits (this is how the pictures above are made).
 
 ## Layout of the code
