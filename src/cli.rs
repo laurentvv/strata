@@ -165,6 +165,10 @@ pub fn run(args: &[String]) {
         res.errors.len()
     );
     println!("  Time elapsed: {}\n", format!("{:.2?}", res.elapsed).bold().green());
+    let denied = crate::scan::access_denied_count(&res.errors);
+    if denied > 0 && cfg!(windows) && !crate::scan::mft::is_elevated() {
+        eprintln!("  Note: {denied} folders could not be read (access denied). Run Strata from an elevated terminal for a complete result.\n");
+    }
     if opts.cleanup {
         print_cleanup(&res.tree);
         println!();
