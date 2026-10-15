@@ -1,8 +1,9 @@
-//! Parallel directory walker. Builds a temporary owned tree with rayon,
-//! then flattens it into the arena `Tree`.
+//! Parallel directory walker. Every entry goes straight into shared compact stores (fixed-size
+//! node records plus one name buffer each); the final arena `Tree` is assembled from them.
 
 use super::model::{DirectFiles, ExtAgg, LiveStats, Node, NodeId, RankedFile, Tree, NONE};
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
@@ -42,38 +43,36 @@ pub struct ScanResult {
     pub elapsed: std::time::Duration,
 }
 
-struct TNode {
-    name: String,
-    size: u64,
-    alloc: u64,
-    files: u64,
-    dirs: u64,
-    modified: i64,
-    attrs: u32,
-    is_dir: bool,
-    is_link: bool,
-    children: Vec<TNode>,
+/// Directory skeleton of the live arena: one fixed-size record per directory plus ONE shared name
+/// buffer. A record is created the moment its directory is discovered (`scanning` set); its direct
+/// totals (`size`/`alloc`/`files`/`dirs` = direct files, file links, directory links) are filled in
+/// once its entries have been read. The sub-directories of a directory are registered in a single
+/// call, so their ids are consecutive: `child_start`/`child_len` of the record hold that id range.
+#[derive(Default)]
+struct LiveDirs {
+    nodes: Vec<Node>,
+    names: String,
+    /// Per directory: (first index, count) of its non-directory entries in the file store.
+    files: Vec<[u32; 2]>,
 }
 
-/// A directory of the live arena: created the moment it is discovered, direct totals filled in
-/// once its entries have been read.
-struct LDir {
-    name: String,
-    parent: NodeId,
-    kids: Vec<NodeId>,
-    size: u64,
-    alloc: u64,
-    files: u64,
-    dir_links: u64,
-    modified: i64,
-    attrs: u32,
-    done: bool,
+/// File and link entries of every directory, appended one directory at a time. Records are kept in
+/// fixed-size chunks (no big reallocation while scanning, and the final build can free them as it
+/// goes); names live in one shared buffer.
+#[derive(Default)]
+struct FileStore {
+    chunks: Vec<Vec<Node>>,
+    names: String,
+    total: u32,
 }
+
+const CHUNK: usize = 8192;
 
 /// Shared, lock-protected directory skeleton that the ticker turns into partial `Tree` snapshots.
 /// Children always have a larger index than their parent.
 struct Live {
-    dirs: Mutex<Vec<LDir>>,
+    dirs: Mutex<LiveDirs>,
+    store: Mutex<FileStore>,
     /// extension -> (count, size, alloc) of every file seen so far.
     types: Mutex<HashMap<String, (u64, u64, u64)>>,
     top: Mutex<Top>,
@@ -87,6 +86,7 @@ impl Default for Live {
     fn default() -> Self {
         Live {
             dirs: Mutex::default(),
+            store: Mutex::default(),
             types: Mutex::default(),
             top: Mutex::default(),
             largest_floor: AtomicU64::new(0),
@@ -114,31 +114,110 @@ fn trim_oldest(v: &mut Vec<RankedFile>) {
     v.truncate(TOP_N);
 }
 
-impl Live {
-    fn add(&self, name: String, parent: NodeId, modified: i64, attrs: u32) -> NodeId {
-        let mut d = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
-        let id = d.len() as NodeId;
-        d.push(LDir { name, parent, kids: Vec::new(), size: 0, alloc: 0, files: 0, dir_links: 0, modified, attrs, done: false });
-        if parent != NONE {
-            d[parent as usize].kids.push(id);
+/// Lower-case extension of `name` without the dot, written into `buf` (empty when there is none).
+/// Same result as `analysis::types::ext_of`, without allocating.
+fn ext_lower<'a>(name: &str, buf: &'a mut String) -> &'a str {
+    buf.clear();
+    if let Some(i) = name.rfind('.') {
+        if i > 0 && i + 1 < name.len() {
+            buf.push_str(&name[i + 1..]);
+            buf.make_ascii_lowercase();
         }
-        id
+    }
+    buf.as_str()
+}
+
+/// Add every directory total to its parent, from the last record to the first (children always
+/// have a larger index than their parent).
+fn aggregate(nodes: &mut [Node]) {
+    for i in (1..nodes.len()).rev() {
+        let (size, alloc, files, dirs, parent) = {
+            let n = &nodes[i];
+            (n.size, n.alloc, n.files, n.dirs, n.parent as usize)
+        };
+        let p = &mut nodes[parent];
+        p.size += size;
+        p.alloc += alloc;
+        p.files += files;
+        p.dirs += 1 + dirs;
+    }
+}
+
+impl Live {
+    /// Register the sub-directories of `parent` (all of them in one call: their ids are consecutive)
+    /// and return the id of the first one. `NONE` as parent registers the root.
+    fn add_dirs<'a>(&self, parent: NodeId, items: impl IntoIterator<Item = (Cow<'a, str>, i64, u32)>) -> NodeId {
+        let mut guard = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
+        let d = &mut *guard;
+        let first = d.nodes.len() as NodeId;
+        for (name, modified, attrs) in items {
+            let node = Node {
+                modified,
+                attrs,
+                scanning: true,
+                name_off: d.names.len() as u32,
+                name_len: name.len() as u32,
+                ..Node::blank(parent, true)
+            };
+            d.names.push_str(&name);
+            d.nodes.push(node);
+            d.files.push([0, 0]);
+        }
+        if parent != NONE {
+            let count = d.nodes.len() as NodeId - first;
+            let p = &mut d.nodes[parent as usize];
+            debug_assert_eq!(p.child_len, 0, "sub-directories are registered in one call");
+            p.child_start = first;
+            p.child_len = count;
+        }
+        first
     }
 
     fn set_direct(&self, id: NodeId, size: u64, alloc: u64, files: u64, dir_links: u64) {
         let mut d = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
-        let n = &mut d[id as usize];
-        (n.size, n.alloc, n.files, n.dir_links) = (size, alloc, files, dir_links);
+        let n = &mut d.nodes[id as usize];
+        (n.size, n.alloc, n.files, n.dirs) = (size, alloc, files, dir_links);
+    }
+
+    /// Append the file and link entries of directory `lid` (names are offsets into `names`) to the
+    /// file store, in one short lock, and remember their range on the directory.
+    fn push_files(&self, lid: NodeId, entries: Vec<Node>, names: &str) {
+        let (first, count) = {
+            let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
+            let s = &mut *guard;
+            let (first, base) = (s.total, s.names.len() as u32);
+            s.names.push_str(names);
+            let count = entries.len() as u32;
+            for mut n in entries {
+                n.name_off += base;
+                if s.chunks.last().is_none_or(|c| c.len() == CHUNK) {
+                    s.chunks.push(Vec::with_capacity(CHUNK));
+                }
+                if let Some(c) = s.chunks.last_mut() {
+                    c.push(n);
+                }
+            }
+            s.total += count;
+            (first, count)
+        };
+        self.dirs.lock().unwrap_or_else(|e| e.into_inner()).files[lid as usize] = [first, count];
     }
 
     /// Fold the files of one directory into the live aggregates and the bounded top lists.
-    fn record_files(&self, lid: NodeId, entries: &[TNode]) {
+    /// `entries` are the directory's records, `names` their (batch-local) name buffer.
+    fn record_files(&self, lid: NodeId, entries: &[Node], names: &str) {
+        let name_of = |f: &Node| &names[f.name_off as usize..(f.name_off + f.name_len) as usize];
         let mut local: HashMap<String, (u64, u64, u64)> = HashMap::new();
+        let mut buf = String::new();
         let floor = self.largest_floor.load(Ordering::Relaxed);
         let ceil = self.oldest_ceil.load(Ordering::Relaxed);
-        let (mut big, mut old): (Vec<&TNode>, Vec<&TNode>) = (Vec::new(), Vec::new());
+        let (mut big, mut old): (Vec<&Node>, Vec<&Node>) = (Vec::new(), Vec::new());
         for f in entries.iter().filter(|f| !f.is_dir && !f.is_link) {
-            let e = local.entry(crate::analysis::types::ext_of(&f.name)).or_default();
+            let ext = ext_lower(name_of(f), &mut buf);
+            let e = match local.get_mut(ext) {
+                Some(e) => e,
+                None => local.entry(ext.to_owned()).or_default(),
+            };
             e.0 += 1;
             e.1 += f.size;
             e.2 += f.alloc;
@@ -153,7 +232,7 @@ impl Live {
         big.truncate(TOP_N);
         old.sort_by_key(|f| f.modified);
         old.truncate(TOP_N);
-        let rank = |f: &&TNode| RankedFile { dir: lid, name: f.name.clone(), size: f.size, modified: f.modified };
+        let rank = |f: &&Node| RankedFile { dir: lid, name: name_of(f).to_owned(), size: f.size, modified: f.modified };
         {
             let mut t = self.types.lock().unwrap_or_else(|e| e.into_inner());
             for (k, v) in local {
@@ -184,47 +263,26 @@ impl Live {
     }
 
     fn finish(&self, id: NodeId) {
-        self.dirs.lock().unwrap_or_else(|e| e.into_inner())[id as usize].done = true;
+        self.dirs.lock().unwrap_or_else(|e| e.into_inner()).nodes[id as usize].scanning = false;
     }
 
     /// Consistent snapshot: directories only, totals aggregated up to the root, unfinished
     /// directories flagged `scanning`. Sizes only ever grow from one snapshot to the next.
     fn snapshot(&self) -> Tree {
-        let mut tree = {
+        // Under the lock: two plain buffer copies (fixed-size records and the name buffer).
+        let (mut nodes, names) = {
             let d = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
-            let (names, kids) = d.iter().fold((0, 0), |(a, b), n| (a + n.name.len(), b + n.kids.len()));
-            let mut t = Tree::with_capacity(d.len(), names, kids);
-            for n in d.iter() {
-                let node = Node {
-                    size: n.size,
-                    alloc: n.alloc,
-                    files: n.files,
-                    dirs: n.dir_links,
-                    modified: n.modified,
-                    attrs: n.attrs,
-                    scanning: !n.done,
-                    ..Node::blank(n.parent, true)
-                };
-                t.push_node(&n.name, node);
-            }
-            for (i, n) in d.iter().enumerate() {
-                t.set_children(i as NodeId, &n.kids);
-            }
-            t
+            (d.nodes.clone(), d.names.clone())
         };
-        let nodes = &mut tree.nodes;
-        let direct: Vec<DirectFiles> = nodes.iter().map(|n| DirectFiles { count: n.files, size: n.size, alloc: n.alloc, modified: 0 }).collect();
-        for i in (1..nodes.len()).rev() {
-            let (size, alloc, files, dirs, parent) = {
-                let n = &nodes[i];
-                (n.size, n.alloc, n.files, n.dirs, n.parent as usize)
-            };
-            let p = &mut nodes[parent];
-            p.size += size;
-            p.alloc += alloc;
-            p.files += files;
-            p.dirs += 1 + dirs;
+        // Turn each record's consecutive sub-directory id range into a child list.
+        let mut kids: Vec<NodeId> = Vec::with_capacity(nodes.len().saturating_sub(1));
+        for n in nodes.iter_mut() {
+            let (first, len) = (n.child_start, n.child_len);
+            n.child_start = kids.len() as u32;
+            kids.extend(first..first + len);
         }
+        let direct: Vec<DirectFiles> = nodes.iter().map(|n| DirectFiles { count: n.files, size: n.size, alloc: n.alloc, modified: 0 }).collect();
+        aggregate(&mut nodes);
         let mut types: Vec<ExtAgg> = {
             let t = self.types.lock().unwrap_or_else(|e| e.into_inner());
             t.iter().map(|(k, v)| ExtAgg { ext: k.clone(), count: v.0, size: v.1, alloc: v.2 }).collect()
@@ -236,7 +294,62 @@ impl Live {
         };
         trim_largest(&mut largest);
         trim_oldest(&mut oldest);
-        tree.live = Some(Box::new(LiveStats { direct, types, largest, oldest }));
+        Tree { nodes, names, kids, live: Some(Box::new(LiveStats { direct, types, largest, oldest })) }
+    }
+
+    /// Consume the stores into the final tree, numbered in pre-order (a directory, then its
+    /// non-directory entries, then each sub-directory with its own subtree), every list in the order
+    /// the entries were read. The numbering only depends on the folder contents, never on which
+    /// thread finished first.
+    fn into_tree(self) -> Tree {
+        let LiveDirs { nodes: mut dirs, names: dir_names, files: ranges } = self.dirs.into_inner().unwrap_or_else(|e| e.into_inner());
+        let FileStore { chunks, names: file_names, total } = self.store.into_inner().unwrap_or_else(|e| e.into_inner());
+        let d = dirs.len();
+        aggregate(&mut dirs);
+        // Pre-order position of every directory: subtree sizes bottom-up (children have larger
+        // live ids), then positions top-down.
+        let mut size: Vec<u32> = ranges.iter().map(|r| 1 + r[1]).collect();
+        for i in (1..d).rev() {
+            let p = dirs[i].parent as usize;
+            size[p] += size[i];
+        }
+        let mut pos = vec![0u32; d];
+        for (i, n) in dirs.iter().enumerate() {
+            let mut next = pos[i] + 1 + ranges[i][1];
+            for c in n.child_start..n.child_start + n.child_len {
+                pos[c as usize] = next;
+                next += size[c as usize];
+            }
+        }
+        drop(size);
+        let mut tree = Tree::with_capacity(0, dir_names.len() + file_names.len(), d.saturating_sub(1) + total as usize);
+        tree.nodes = vec![Node::blank(NONE, false); d + total as usize];
+        let file_base = dir_names.len() as u32;
+        tree.names.push_str(&dir_names);
+        drop(dir_names);
+        tree.names.push_str(&file_names);
+        drop(file_names);
+        // Files, in store order (each chunk is freed once placed).
+        let mut g = 0u32;
+        for chunk in chunks {
+            for n in chunk {
+                let p = n.parent as usize;
+                tree.nodes[(pos[p] + 1 + g - ranges[p][0]) as usize] = Node { parent: pos[p], name_off: n.name_off + file_base, ..n };
+                g += 1;
+            }
+        }
+        for (i, mut n) in dirs.into_iter().enumerate() {
+            let start = tree.kids.len() as u32;
+            tree.kids.extend(pos[i] + 1..pos[i] + 1 + ranges[i][1]);
+            tree.kids.extend((n.child_start..n.child_start + n.child_len).map(|c| pos[c as usize]));
+            n.child_len += ranges[i][1];
+            n.child_start = start;
+            n.scanning = false;
+            if n.parent != NONE {
+                n.parent = pos[n.parent as usize];
+            }
+            tree.nodes[pos[i] as usize] = n;
+        }
         tree
     }
 }
@@ -289,13 +402,13 @@ fn attrs_of(_meta: &fs::Metadata) -> u32 {
 /// Allocated size on disk. Windows: GetCompressedFileSize for compressed/sparse
 /// files, otherwise logical size rounded up to a 4 KiB cluster. Unix: st_blocks.
 #[cfg(windows)]
-fn allocated(path: &Path, _meta: &fs::Metadata, logical: u64, attrs: u32) -> u64 {
+fn allocated(entry: &fs::DirEntry, _meta: &fs::Metadata, logical: u64, attrs: u32) -> u64 {
     if logical == 0 {
         return 0;
     }
     if attrs & (FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_SPARSE_FILE) != 0 {
         use std::os::windows::ffi::OsStrExt;
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = entry.path().as_os_str().encode_wide().chain(std::iter::once(0)).collect();
         let mut high: u32 = 0;
         // SAFETY: `wide` is a valid NUL-terminated UTF-16 string; `high` is a valid out pointer.
         let low = unsafe { windows_sys::Win32::Storage::FileSystem::GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
@@ -307,26 +420,17 @@ fn allocated(path: &Path, _meta: &fs::Metadata, logical: u64, attrs: u32) -> u64
     logical.div_ceil(CLUSTER) * CLUSTER
 }
 #[cfg(not(windows))]
-fn allocated(_path: &Path, meta: &fs::Metadata, _logical: u64, _attrs: u32) -> u64 {
+fn allocated(_entry: &fs::DirEntry, meta: &fs::Metadata, _logical: u64, _attrs: u32) -> u64 {
     use std::os::unix::fs::MetadataExt;
     meta.blocks() * 512
 }
 
-fn walk(path: &Path, name: String, meta: Option<&fs::Metadata>, ctx: &Ctx, lid: NodeId) -> TNode {
-    let mut node = TNode {
-        name,
-        size: 0,
-        alloc: 0,
-        files: 0,
-        dirs: 0,
-        modified: meta.map(mtime).unwrap_or(0),
-        attrs: meta.map(attrs_of).unwrap_or(0),
-        is_dir: true,
-        is_link: false,
-        children: Vec::new(),
-    };
+/// Read one directory: its files and links go to the live file store as one batch, its
+/// sub-directories are registered at once and walked in parallel. Totals are derived later from the
+/// live records, so nothing is returned.
+fn walk(path: &Path, ctx: &Ctx, lid: NodeId) {
     if ctx.cancel.load(Ordering::Relaxed) {
-        return node;
+        return;
     }
     ctx.progress.dirs.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut cur) = ctx.progress.current.try_lock() {
@@ -338,10 +442,14 @@ fn walk(path: &Path, name: String, meta: Option<&fs::Metadata>, ctx: &Ctx, lid: 
         Err(e) => {
             ctx.err(path, &e);
             ctx.live.finish(lid);
-            return node;
+            return;
         }
     };
-    let mut subdirs: Vec<(PathBuf, String, fs::Metadata, NodeId)> = Vec::new();
+    // Sub-directories to descend into: (path, mtime, attrs).
+    let mut subs: Vec<(PathBuf, i64, u32)> = Vec::new();
+    // This directory's file and link entries, with batch-local name offsets.
+    let mut batch: Vec<Node> = Vec::new();
+    let mut batch_names = String::new();
     let (mut d_size, mut d_alloc, mut d_files, mut d_links) = (0u64, 0u64, 0u64, 0u64);
     for entry in rd {
         let entry = match entry {
@@ -351,116 +459,74 @@ fn walk(path: &Path, name: String, meta: Option<&fs::Metadata>, ctx: &Ctx, lid: 
                 continue;
             }
         };
-        let epath = entry.path();
-        if ctx.excludes.iter().any(|x| x == &epath) {
-            continue;
+        if !ctx.excludes.is_empty() {
+            let epath = entry.path();
+            if ctx.excludes.iter().any(|x| x == &epath) {
+                continue;
+            }
         }
-        let ename = entry.file_name().to_string_lossy().into_owned();
         // `DirEntry::metadata` does not follow links (and is free on Windows).
         let emeta = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {
-                ctx.err(&epath, &e);
+                ctx.err(&entry.path(), &e);
                 continue;
             }
         };
         let attrs = attrs_of(&emeta);
         let ft = emeta.file_type();
         let is_link = ft.is_symlink() || (attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && ft.is_dir());
-        if is_link {
+        if !is_link && ft.is_dir() {
+            subs.push((entry.path(), mtime(&emeta), attrs));
+            continue;
+        }
+        let (size, alloc) = if is_link {
             // Symlinks / junctions: record the entry, never descend (no loops).
             if ft.is_dir() {
                 d_links += 1;
             } else {
                 d_files += 1;
             }
-            node.children.push(TNode {
-                name: ename,
-                size: 0,
-                alloc: 0,
-                files: 0,
-                dirs: 0,
-                modified: mtime(&emeta),
-                attrs,
-                is_dir: ft.is_dir(),
-                is_link: true,
-                children: Vec::new(),
-            });
-        } else if ft.is_dir() {
-            // Registered immediately so the folder shows up in the live tree before it is read.
-            let id = ctx.live.add(ename.clone(), lid, mtime(&emeta), attrs);
-            subdirs.push((epath, ename, emeta, id));
+            (0, 0)
         } else {
             let logical = emeta.len();
-            let alloc = allocated(&epath, &emeta, logical, attrs);
+            let alloc = allocated(&entry, &emeta, logical, attrs);
             ctx.progress.files.fetch_add(1, Ordering::Relaxed);
             ctx.progress.bytes.fetch_add(logical, Ordering::Relaxed);
             d_size += logical;
             d_alloc += alloc;
             d_files += 1;
-            node.children.push(TNode {
-                name: ename,
-                size: logical,
-                alloc,
-                files: 0,
-                dirs: 0,
-                modified: mtime(&emeta),
-                attrs,
-                is_dir: false,
-                is_link: false,
-                children: Vec::new(),
-            });
-        }
+            (logical, alloc)
+        };
+        let ename = entry.file_name();
+        let ename = ename.to_string_lossy();
+        batch.push(Node {
+            size,
+            alloc,
+            modified: mtime(&emeta),
+            attrs,
+            is_link,
+            name_off: batch_names.len() as u32,
+            name_len: ename.len() as u32,
+            ..Node::blank(lid, ft.is_dir())
+        });
+        batch_names.push_str(&ename);
     }
-    ctx.live.record_files(lid, &node.children);
-    ctx.live.set_direct(lid, d_size, d_alloc, d_files, d_links);
-    let sub: Vec<TNode> = subdirs
-        .par_iter()
-        .map(|(p, n, m, id)| walk(p, n.clone(), Some(m), ctx, *id))
-        .collect();
-    node.children.extend(sub);
-    ctx.live.finish(lid);
-    for c in &node.children {
-        node.size += c.size;
-        node.alloc += c.alloc;
-        if c.is_dir {
-            node.dirs += 1 + c.dirs;
-            node.files += c.files;
-        } else {
-            node.files += 1;
-        }
-    }
-    node
-}
-
-/// Total name bytes of a temporary tree (for exact reservation).
-fn name_bytes(t: &TNode) -> usize {
-    t.name.len() + t.children.iter().map(name_bytes).sum::<usize>()
-}
-
-fn flatten(t: TNode, parent: NodeId, out: &mut Tree) -> NodeId {
-    let node = Node {
-        size: t.size,
-        alloc: t.alloc,
-        files: t.files,
-        dirs: t.dirs,
-        modified: t.modified,
-        attrs: t.attrs,
-        is_link: t.is_link,
-        ..Node::blank(parent, t.is_dir)
+    // Registered before they are read so the folders show up in the live tree at once.
+    let first_sub = if subs.is_empty() {
+        NONE
+    } else {
+        ctx.live.add_dirs(
+            lid,
+            subs.iter().map(|(p, modified, attrs)| (p.file_name().map_or(Cow::Borrowed(""), |n| n.to_string_lossy()), *modified, *attrs)),
+        )
     };
-    let id = out.push_node(&t.name, node);
-    // Reserve this directory's slots in the flat child array, then fill them as the children are placed.
-    let start = out.kids.len();
-    let count = t.children.len();
-    out.kids.resize(start + count, NONE);
-    out.nodes[id as usize].child_start = start as u32;
-    out.nodes[id as usize].child_len = count as u32;
-    for (i, c) in t.children.into_iter().enumerate() {
-        let cid = flatten(c, id, out);
-        out.kids[start + i] = cid;
-    }
-    id
+    ctx.live.record_files(lid, &batch, &batch_names);
+    ctx.live.push_files(lid, batch, &batch_names);
+    drop(batch_names);
+    ctx.live.set_direct(lid, d_size, d_alloc, d_files, d_links);
+    subs.par_iter().enumerate().for_each(|(i, (p, _, _))| walk(p, ctx, first_sub + i as NodeId));
+    ctx.live.finish(lid);
 }
 
 /// Scan `root` synchronously (blocks the calling thread). Cancel via `cancel`.
@@ -475,12 +541,12 @@ pub fn scan_live(root: &Path, progress: &Progress, cancel: &AtomicBool, excludes
     let start = Instant::now();
     let live = Live::default();
     let ctx = Ctx { live: &live, progress, cancel, excludes, errors: Mutex::new(Vec::new()) };
-    let root_name = root.to_string_lossy().into_owned();
+    let root_name = root.to_string_lossy();
     let meta = fs::metadata(root).ok();
-    let rid = live.add(root_name.clone(), NONE, meta.as_ref().map(mtime).unwrap_or(0), meta.as_ref().map(attrs_of).unwrap_or(0));
+    let rid = live.add_dirs(NONE, [(root_name, meta.as_ref().map(mtime).unwrap_or(0), meta.as_ref().map(attrs_of).unwrap_or(0))]);
     let pool = rayon::ThreadPoolBuilder::new().stack_size(32 << 20).build();
     let finished = AtomicBool::new(false);
-    let troot = std::thread::scope(|s| {
+    std::thread::scope(|s| {
         if let Some(sink) = sink {
             s.spawn(|| {
                 let mut wait = FIRST_SNAPSHOT;
@@ -499,27 +565,17 @@ pub fn scan_live(root: &Path, progress: &Progress, cancel: &AtomicBool, excludes
                 }
             });
         }
-        let troot = match &pool {
-            Ok(p) => p.install(|| walk(root, root_name.clone(), meta.as_ref(), &ctx, rid)),
-            Err(_) => walk(root, root_name.clone(), meta.as_ref(), &ctx, rid),
-        };
+        match &pool {
+            Ok(p) => p.install(|| walk(root, &ctx, rid)),
+            Err(_) => walk(root, &ctx, rid),
+        }
         finished.store(true, Ordering::Relaxed);
-        troot
     });
     if let Some(sink) = sink {
         sink(live.snapshot());
     }
-    // Exact reservation: growing by doubling would transiently need twice the arena (hundreds of MB on a big drive).
-    let count = (troot.files + troot.dirs) as usize + 1;
-    let mut tree = Tree::with_capacity(count, name_bytes(&troot), count - 1);
-    flatten(troot, NONE, &mut tree);
-    ScanResult {
-        root: root.to_path_buf(),
-        tree,
-        errors: ctx.errors.into_inner().unwrap_or_default(),
-        cancelled: cancel.load(Ordering::Relaxed),
-        elapsed: start.elapsed(),
-    }
+    let errors = ctx.errors.into_inner().unwrap_or_default();
+    ScanResult { root: root.to_path_buf(), tree: live.into_tree(), errors, cancelled: cancel.load(Ordering::Relaxed), elapsed: start.elapsed() }
 }
 
 /// Convenience used by the CLI and tests: scan without progress/cancel plumbing.
@@ -531,12 +587,17 @@ pub fn scan_simple(root: &Path) -> ScanResult {
 mod tests {
     use super::*;
 
+    /// Register one directory below `parent` (tests only: a parent may get a single such call).
+    fn add(live: &Live, name: &str, parent: NodeId, modified: i64, attrs: u32) -> NodeId {
+        live.add_dirs(parent, [(Cow::Borrowed(name), modified, attrs)])
+    }
+
     #[test]
     fn snapshot_aggregates_and_flags_unfinished_dirs() {
         let live = Live::default();
-        let root = live.add("R".into(), NONE, 0, 0);
-        let a = live.add("a".into(), root, 0, 0);
-        let b = live.add("b".into(), a, 0, 0);
+        let root = add(&live, "R", NONE, 0, 0);
+        let a = add(&live, "a", root, 0, 0);
+        let b = add(&live, "b", a, 0, 0);
         live.set_direct(root, 1, 4096, 1, 0);
         live.set_direct(a, 10, 4096, 2, 0);
         live.set_direct(b, 100, 4096, 3, 1);
@@ -559,20 +620,36 @@ mod tests {
         assert_eq!((l.direct[b as usize].count, l.direct[b as usize].size), (4, 150));
     }
 
-    fn file(name: &str, size: u64, modified: i64) -> TNode {
-        TNode { name: name.into(), size, alloc: size, files: 0, dirs: 0, modified, attrs: 0, is_dir: false, is_link: false, children: Vec::new() }
+    /// A batch of plain files (name, size, modified) as the walker builds it: records plus names.
+    fn batch(files: &[(String, u64, i64)]) -> (Vec<Node>, String) {
+        let mut names = String::new();
+        let nodes = files
+            .iter()
+            .map(|(name, size, modified)| {
+                let node = Node { size: *size, alloc: *size, modified: *modified, name_off: names.len() as u32, name_len: name.len() as u32, ..Node::blank(0, false) };
+                names.push_str(name);
+                node
+            })
+            .collect();
+        (nodes, names)
+    }
+
+    fn file(name: &str, size: u64, modified: i64) -> (String, u64, i64) {
+        (name.to_string(), size, modified)
     }
 
     #[test]
     fn live_stats_aggregate_and_stay_bounded() {
         let live = Live::default();
-        let root = live.add("R".into(), NONE, 0, 0);
+        let root = add(&live, "R", NONE, 0, 0);
         // 3 batches of 150 files each: far more than TOP_N in total
-        for batch in 0..3u64 {
-            let files: Vec<TNode> = (0..150u64).map(|i| file(&format!("f{batch}_{i}.dat"), batch * 1000 + i, 1000 + (batch * 150 + i) as i64)).collect();
-            live.record_files(root, &files);
+        for b in 0..3u64 {
+            let files: Vec<_> = (0..150u64).map(|i| file(&format!("f{b}_{i}.dat"), b * 1000 + i, 1000 + (b * 150 + i) as i64)).collect();
+            let (nodes, names) = batch(&files);
+            live.record_files(root, &nodes, &names);
         }
-        live.record_files(root, &[file("Readme.TXT", 5, 1), file("noext", 7, 2), file("junction.dat", 0, 3)]);
+        let (nodes, names) = batch(&[file("Readme.TXT", 5, 1), file("noext", 7, 2), file("junction.dat", 0, 3)]);
+        live.record_files(root, &nodes, &names);
         live.set_direct(root, 0, 0, 0, 0);
         let t = live.snapshot();
         let l = t.live.as_ref().unwrap();
@@ -588,5 +665,258 @@ mod tests {
         assert!(l.types.iter().any(|e| e.ext.is_empty() && e.size == 7));
         assert_eq!(l.types.iter().map(|e| e.count).sum::<u64>(), 453);
         assert!(l.types.windows(2).all(|w| w[0].size >= w[1].size));
+    }
+
+    #[test]
+    fn ext_lower_matches_ext_of() {
+        let mut buf = String::new();
+        for name in ["Photo.JPG", "README", ".gitignore", "trailing.", "a.b.TAR.GZ", "x.", ".", "", "\u{e9}t\u{e9}.D\u{c9}J", "dir.name/f"] {
+            assert_eq!(ext_lower(name, &mut buf), crate::analysis::types::ext_of(name), "{name:?}");
+        }
+    }
+
+    // ---- whole-scan tests on temporary folders ----
+
+    use std::fs::File;
+    use std::io::Write;
+
+    fn put(dir: &Path, name: &str, size: usize) {
+        File::create(dir.join(name)).unwrap().write_all(&vec![b'x'; size]).unwrap();
+    }
+
+    /// Directory link without admin rights when the platform allows it; false when it cannot be made.
+    fn make_dir_link(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return true;
+            }
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    /// Expected tree lines `rel|kind|size|files|dirs` (pre-order, files and links before
+    /// sub-directories, read_dir order), computed with plain std::fs.
+    fn expected(dir: &Path, rel: &str) -> (Vec<String>, u64, u64, u64) {
+        let (mut flat, mut subs) = (Vec::new(), Vec::new());
+        let (mut size, mut files, mut dirs) = (0u64, 0u64, 0u64);
+        for e in fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let meta = e.metadata().unwrap();
+            let ft = meta.file_type();
+            let is_link = ft.is_symlink() || (attrs_of(&meta) & FILE_ATTRIBUTE_REPARSE_POINT != 0 && ft.is_dir());
+            if is_link {
+                if ft.is_dir() {
+                    dirs += 1;
+                } else {
+                    files += 1;
+                }
+                flat.push(format!("{child}|L|0|0|0"));
+            } else if ft.is_dir() {
+                subs.push((e.path(), child));
+            } else {
+                size += meta.len();
+                files += 1;
+                flat.push(format!("{child}|F|{}|0|0", meta.len()));
+            }
+        }
+        let mut lines = Vec::new();
+        for (p, child) in subs {
+            let (l, s, f, d) = expected(&p, &child);
+            size += s;
+            files += f;
+            dirs += 1 + d;
+            lines.extend(l);
+        }
+        let mut out = vec![format!("{rel}|D|{size}|{files}|{dirs}")];
+        out.extend(flat);
+        out.extend(lines);
+        (out, size, files, dirs)
+    }
+
+    fn lines_of(t: &Tree, id: NodeId, rel: &str, out: &mut Vec<String>) {
+        let n = t.get(id);
+        let kind = if n.is_link { "L" } else if n.is_dir { "D" } else { "F" };
+        out.push(format!("{rel}|{kind}|{}|{}|{}", n.size, n.files, n.dirs));
+        for &c in t.children(id) {
+            let child = if rel.is_empty() { t.name(c).to_string() } else { format!("{rel}/{}", t.name(c)) };
+            lines_of(t, c, &child, out);
+        }
+    }
+
+    /// Structural invariants of a finished tree.
+    fn check_tree(t: &Tree) {
+        for (i, n) in t.nodes.iter().enumerate() {
+            let id = i as NodeId;
+            assert!(!n.scanning, "node {id} still flagged scanning");
+            assert!(n.is_dir || t.children(id).is_empty());
+            let (mut size, mut files, mut dirs, mut seen_dir) = (0u64, 0u64, 0u64, false);
+            for &c in t.children(id) {
+                let ch = t.get(c);
+                assert!(c > id && ch.parent == id, "child {c} of {id}");
+                let sub = ch.is_dir && !ch.is_link;
+                assert!(!(seen_dir && !sub), "files must come before sub-directories");
+                seen_dir |= sub;
+                size += ch.size;
+                if ch.is_dir {
+                    dirs += 1 + ch.dirs;
+                    files += ch.files;
+                } else {
+                    files += 1;
+                }
+            }
+            if n.is_dir {
+                assert_eq!((n.size, n.files, n.dirs), (size, files, dirs), "totals of node {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn scan_matches_independent_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        put(root, "top.TXT", 10);
+        put(root, "zero.bin", 0);
+        put(root, "r\u{e9}sum\u{e9}.pdf", 5000);
+        fs::create_dir(root.join("empty")).unwrap();
+        fs::create_dir_all(root.join("\u{65e5}\u{672c}\u{8a9e}/deep/deeper")).unwrap();
+        put(&root.join("\u{65e5}\u{672c}\u{8a9e}"), "\u{fc}n\u{ef}.dat", 123);
+        put(&root.join("\u{65e5}\u{672c}\u{8a9e}/deep"), "emoji-\u{1f600}.log", 77);
+        put(&root.join("\u{65e5}\u{672c}\u{8a9e}/deep/deeper"), "a.b.c", 1);
+        fs::create_dir_all(root.join("src/empty_inner")).unwrap();
+        put(&root.join("src"), "main.rs", 4097);
+        let linked = make_dir_link(&root.join("src"), &root.join("a_link"));
+        eprintln!("directory link created: {linked}");
+        let (want, ..) = expected(root, "");
+        let res = scan_simple(root);
+        assert!(!res.cancelled && res.errors.is_empty());
+        let mut got = Vec::new();
+        lines_of(&res.tree, Tree::ROOT, "", &mut got);
+        assert_eq!(got, want);
+        check_tree(&res.tree);
+        if linked {
+            assert!(got.iter().any(|l| l.starts_with("a_link|L|")), "link listed but not followed");
+            assert!(!got.iter().any(|l| l.starts_with("a_link/")));
+        }
+        assert_eq!(res.tree.nodes.len(), got.len());
+        // ids are a pre-order numbering: stable whatever thread finished first
+        fn preorder(t: &Tree, id: NodeId, out: &mut Vec<NodeId>) {
+            out.push(id);
+            for &c in t.children(id) {
+                preorder(t, c, out);
+            }
+        }
+        let mut ids = Vec::new();
+        preorder(&res.tree, Tree::ROOT, &mut ids);
+        assert!(ids.iter().enumerate().all(|(i, &id)| id as usize == i));
+    }
+
+    #[test]
+    fn cancelled_scan_returns_consistent_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..200 {
+            let d = tmp.path().join(format!("d{i}"));
+            fs::create_dir_all(d.join("inner")).unwrap();
+            for j in 0..10 {
+                put(&d, &format!("f{j}.dat"), 100 + j);
+                put(&d.join("inner"), &format!("g{j}.txt"), 7);
+            }
+        }
+        let progress = Progress::default();
+        let cancel = AtomicBool::new(false);
+        let done = AtomicBool::new(false);
+        let res = std::thread::scope(|s| {
+            s.spawn(|| {
+                while !done.load(Ordering::Relaxed) && progress.dirs.load(Ordering::Relaxed) < 20 {
+                    std::thread::yield_now();
+                }
+                cancel.store(true, Ordering::Relaxed);
+            });
+            let r = scan_blocking(tmp.path(), &progress, &cancel, &[]);
+            done.store(true, Ordering::Relaxed);
+            r
+        });
+        assert!(res.cancelled);
+        check_tree(&res.tree);
+        let full = 200 * 20u64;
+        assert!(res.tree.get(Tree::ROOT).files <= full);
+        // every name resolves and parents/children agree
+        for id in 0..res.tree.nodes.len() as NodeId {
+            let _ = res.tree.name(id);
+            assert!(res.tree.path_of(id).starts_with(tmp.path()));
+        }
+    }
+
+    #[test]
+    fn snapshots_during_a_scan_stay_ordered_and_monotonic() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            let d = tmp.path().join(format!("d{i}"));
+            fs::create_dir_all(d.join("sub")).unwrap();
+            for j in 0..40 {
+                put(&d, &format!("f{j}.dat"), 10 + j);
+            }
+            for j in 0..25 {
+                put(&d.join("sub"), &format!("g{j}.txt"), 3);
+            }
+        }
+        // 40 * (40 + 25) = 2600 files
+        let live = Live::default();
+        let progress = Progress::default();
+        let cancel = AtomicBool::new(false);
+        let ctx = Ctx { live: &live, progress: &progress, cancel: &cancel, excludes: &[], errors: Mutex::new(Vec::new()) };
+        let name = tmp.path().to_string_lossy();
+        let rid = live.add_dirs(NONE, [(name, 0, 0)]);
+        let finished = AtomicBool::new(false);
+        let snaps = std::thread::scope(|s| {
+            let h = s.spawn(|| {
+                let mut v = Vec::new();
+                while !finished.load(Ordering::Relaxed) {
+                    v.push(live.snapshot());
+                    std::thread::yield_now();
+                }
+                v.push(live.snapshot());
+                v
+            });
+            walk(tmp.path(), &ctx, rid);
+            finished.store(true, Ordering::Relaxed);
+            h.join().unwrap()
+        });
+        assert!(!snaps.is_empty());
+        let (mut size, mut files, mut dirs) = (0u64, 0u64, 0u64);
+        for t in &snaps {
+            for (i, n) in t.nodes.iter().enumerate() {
+                for &c in t.children(i as NodeId) {
+                    assert!(c as usize > i, "child {c} of {i}");
+                    assert_eq!(t.get(c).parent as usize, i);
+                }
+                assert!(n.is_dir);
+            }
+            let r = t.get(Tree::ROOT);
+            assert!(r.size >= size && r.files >= files && r.dirs >= dirs, "totals shrank");
+            (size, files, dirs) = (r.size, r.files, r.dirs);
+        }
+        let last = snaps.last().unwrap();
+        assert_eq!(last.get(Tree::ROOT).files, 2600);
+        assert_eq!(last.get(Tree::ROOT).dirs, 80);
+        assert!(last.nodes.iter().all(|n| !n.scanning));
+        assert_eq!(live.into_tree().get(Tree::ROOT).files, 2600);
     }
 }
