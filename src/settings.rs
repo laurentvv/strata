@@ -32,6 +32,14 @@ pub enum ViewKind {
     System,
 }
 
+impl ViewKind {
+    /// Views that have nothing to show while a scan runs (they work on the finished tree, or on a run of their own):
+    /// a scan must never start in one of them, or the user watches an empty page.
+    pub fn needs_finished_scan(self) -> bool {
+        matches!(self, ViewKind::Cleanup | ViewKind::Age | ViewKind::System | ViewKind::Duplicates | ViewKind::Compare)
+    }
+}
+
 /// Unit used to display sizes everywhere (tree, status bar, views, exports).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Units {
@@ -258,6 +266,16 @@ pub fn save_to(path: &Path, s: &Settings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn views_that_need_a_finished_scan_are_the_analysis_ones() {
+        for v in [ViewKind::Cleanup, ViewKind::Age, ViewKind::System, ViewKind::Duplicates, ViewKind::Compare] {
+            assert!(v.needs_finished_scan(), "{v:?}");
+        }
+        for v in [ViewKind::Tree, ViewKind::Treemap, ViewKind::Chart, ViewKind::Types, ViewKind::Largest, ViewKind::Oldest] {
+            assert!(!v.needs_finished_scan(), "{v:?}");
+        }
+    }
 
     #[test]
     fn roundtrip() {
