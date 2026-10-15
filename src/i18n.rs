@@ -66,6 +66,10 @@ pub fn tr(s: &str) -> String {
     strip_accel(s)
 }
 
+/// Serialises the tests that depend on the process-wide language.
+#[cfg(test)]
+pub static LANG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Does the table of `code` know this English label? (translation audit)
 #[cfg(test)]
 pub fn is_translated(code: &str, s: &str) -> bool {
@@ -143,7 +147,8 @@ mod tests {
 
     #[test]
     fn tr_uses_the_active_language() {
-        // One test owns the global language to stay deterministic under parallel test threads.
+        // The language is global: tests that read or change it hold `LANG_LOCK`.
+        let _guard = LANG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_language("fr");
         assert_eq!(tr("&Refresh"), "Actualiser");
         assert_eq!(tr("not in the table"), "not in the table");
