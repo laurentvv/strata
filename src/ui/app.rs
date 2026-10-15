@@ -2026,7 +2026,8 @@ impl App {
             ui.weak(tr("Candidates by size while the scan runs; hashing starts when it ends."));
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for (size, files) in cands.iter().take(500) {
-                    egui::CollapsingHeader::new(format!("{} x {} {}", format_bytes(*size), files.len(), tr("copies"))).id_salt(("cand", *size)).show(ui, |ui| {
+                    let name = files.first().map(|f| f.name.as_str()).unwrap_or_default();
+                    egui::CollapsingHeader::new(format!("{} - {} x {} {}", name, format_bytes(*size), files.len(), tr("copies"))).id_salt(("cand", *size)).show(ui, |ui| {
                         for f in files {
                             ui.label(tree.path_of(f.dir).join(&f.name).display().to_string());
                         }
@@ -2048,8 +2049,11 @@ impl App {
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for (gi, g) in groups.iter().take(2000).enumerate() {
+                // Lead with the file name: a bare size does not say which files a group is about.
+                let name = g.paths.first().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 egui::CollapsingHeader::new(format!(
-                    "{} x {} {} - {} {}",
+                    "{} - {} x {} {} - {} {}",
+                    name,
                     format_bytes(g.size),
                     g.paths.len(),
                     tr("copies"),
