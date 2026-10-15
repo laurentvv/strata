@@ -1,6 +1,7 @@
 mod chrome;
 mod deletion;
 mod dialogs;
+mod recycle;
 mod ribbon;
 #[cfg(test)]
 mod ui_tests;
@@ -391,6 +392,8 @@ pub struct App {
     props: Option<NodeId>,
     /// Deletion waiting for the user's confirmation, and the one running in the background.
     confirm: Option<deletion::DeleteRequest>,
+    /// Size of the Recycle Bin, the offer to empty it and its confirmation.
+    bin: recycle::Bin,
     delete_job: Option<deletion::DeleteJob>,
     /// "Delete permanently" ticked in the confirmation window.
     delete_permanently: bool,
@@ -727,6 +730,7 @@ impl App {
             selected: None,
             props: None,
             confirm: None,
+            bin: recycle::Bin::default(),
             delete_job: None,
             delete_permanently: false,
             cleanup_checked: HashSet::new(),
@@ -2755,6 +2759,9 @@ impl App {
         let total: u64 = rows.iter().map(|r| r.size).sum();
         let safe: u64 = rows.iter().filter(|r| r.risk == insights::Risk::Safe).map(|r| r.size).sum();
         ui.label(RichText::new(format!("{}: {} ({} {}) - {}: {}", tr("Can be reclaimed"), format_bytes(total), rows.len(), tr("folders"), tr("Safe"), format_bytes(safe))).strong());
+        if self.bin.info.is_none() && !self.bin.queried {
+            self.refresh_bin();
+        }
         // Ticks of rows that no longer exist (after a rescan or a deletion) are dropped.
         self.cleanup_checked.retain(|id| rows.iter().any(|r| r.id == *id));
         let checked_size: u64 = rows.iter().filter(|r| self.cleanup_checked.contains(&r.id)).map(|r| r.size).sum();
@@ -2779,6 +2786,7 @@ impl App {
                 if ui.button(tr("Windows storage settings")).clicked() {
                     let _ = std::process::Command::new("cmd").args(["/C", "start", "", "ms-settings:storagesense"]).spawn();
                 }
+                self.bin_button(ui);
             });
         }
         ui.weak(tr("Tick the folders to delete. Nothing is removed without confirmation."));
@@ -2858,6 +2866,7 @@ impl App {
     fn windows(&mut self, ctx: &egui::Context) {
         self.options_window(ctx);
         self.delete_window(ctx);
+        self.bin_confirm_window(ctx);
         self.name_window(ctx);
         self.about_window(ctx);
         if let (Some(id), Some(l)) = (self.props, &self.loaded) {
@@ -2990,6 +2999,7 @@ impl App {
         self.apply_settings(&ctx);
         self.poll_scan();
         self.poll_delete(&ctx);
+        self.poll_bin(&ctx);
         self.poll_sub_scan();
         self.poll_duplicates();
         if self.handle.is_some() || self.dup_run.is_some() {
@@ -3034,6 +3044,7 @@ impl App {
         }
         egui::CentralPanel::default().show(ui, |ui| {
             self.admin_banner(ui);
+            self.bin_banner(ui);
             self.central(ui);
         });
         self.windows(&ctx);

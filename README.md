@@ -22,8 +22,8 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   size by file age and big files not modified for over a year (always "Check first"). Dependency folders of
   installed programs and globally installed tools are never offered. For what Strata does not delete itself
   (Windows Update files, system logs) there are buttons for Windows Disk Cleanup and the storage settings.
-- **Safe by default**: deletions go to the Recycle Bin after a confirmation (a note says the space is only freed
-  once it is emptied). "Delete permanently" is an unticked option of the confirmation; drive roots, the Windows
+- **Safe by default**: deletions go to the Recycle Bin after a confirmation; a banner then says the space is only
+  freed once it is emptied and offers to empty it (after asking: it empties the whole bin, and shows its size). "Delete permanently" is an unticked option of the confirmation; drive roots, the Windows
   and program folders and the profile folders themselves are always refused. Deletions run in the background with
   progress and a Stop button.
 - **Explorer-like actions**: right-click menu on every row (open, terminal, rename, new folder,

@@ -311,6 +311,13 @@ fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
         }
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.not_admin = true);
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] start page admin notice: {t}")));
+        let out = frames(lang, egui::vec2(1200.0, 900.0), |a| {
+            a.bin.info = Some((5 << 30, 120));
+            a.bin.queried = true;
+            a.bin.banner = Some((3, 1 << 30));
+            a.bin.confirm = true;
+        });
+        problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] Recycle Bin banner and confirmation: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_options = true);
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] options window: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_about = true);
@@ -558,4 +565,59 @@ fn the_about_window_copies_the_diagnostics_and_says_so() {
     h.state_mut().show_about = false;
     h.run_steps(3);
     assert!(!h.state().about_copied, "closing the window forgets it");
+}
+
+#[test]
+fn the_recycle_bin_can_be_emptied_only_after_a_confirmation_that_can_be_cancelled() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    h.state_mut().bin.info = Some((5 << 30, 120));
+    h.state_mut().bin.queried = true;
+    h.state_mut().view = ViewKind::Cleanup;
+    h.run_steps(4);
+    let p = center_of(&h, "Empty the Recycle Bin (5.0 GB)");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().bin.confirm, "the click asks first");
+    assert!(h.query_by_label_contains("cannot be undone").is_some(), "the window says it is irreversible and total");
+    assert!(h.query_by_label_contains("120 items").is_some());
+    let p = center_of(&h, "Cancel");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(!h.state().bin.confirm);
+    assert!(h.query_by_label_contains("cannot be undone").is_none());
+    assert!(h.state().bin.info.is_some(), "nothing was emptied");
+}
+
+#[test]
+fn after_a_deletion_to_the_recycle_bin_a_banner_explains_the_space_is_not_free_yet() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    h.state_mut().bin.info = Some((2 << 30, 7));
+    h.state_mut().bin.queried = true;
+    h.state_mut().bin.banner = Some((3, 1 << 30));
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Moved to the Recycle Bin: 3").is_some());
+    assert!(h.query_by_label_contains("only freed once the Recycle Bin is emptied").is_some());
+    assert!(h.query_by_label_contains("Empty the Recycle Bin (2.0 GB)").is_some(), "the way to free it, with the size of the bin");
+    let p = center_of(&h, "Dismiss");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().bin.banner.is_none());
+    assert!(h.query_by_label_contains("only freed once the Recycle Bin is emptied").is_none());
+}
+
+#[test]
+fn the_recycle_bin_texts_are_translated() {
+    for t in [
+        "Empty the Recycle Bin",
+        "Free the space of what was moved to the Recycle Bin.",
+        "The space is only freed once the Recycle Bin is emptied.",
+        "This empties the whole Recycle Bin, including what was not deleted with Strata. It cannot be undone.",
+        "Recycle Bin emptied",
+        "The Recycle Bin could not be emptied",
+        "Emptying the Recycle Bin...",
+        "items",
+    ] {
+        assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
+    }
 }

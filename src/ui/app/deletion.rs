@@ -182,6 +182,10 @@ impl App {
         self.invalidate();
         let verb = if job.permanently { tr("Deleted") } else { tr("Moved to the Recycle Bin") };
         self.notice = format!("{verb}: {} - {}", job.removed.len(), format_bytes(job.freed));
+        if !job.permanently && !job.removed.is_empty() && cfg!(windows) {
+            self.bin.banner = Some((job.removed.len(), job.freed));
+            self.refresh_bin();
+        }
         if !job.failed.is_empty() {
             self.delete_error = Some(job.failed.join("\n"));
         }

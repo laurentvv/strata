@@ -62,8 +62,50 @@ pub fn recycle(path: &std::path::Path) -> Result<(), String> {
     Err("Recycle Bin is only supported on Windows".into())
 }
 
+/// (bytes, items) held by the Recycle Bin of every drive; `None` when Windows cannot say.
+#[cfg(windows)]
+pub fn recycle_bin_info() -> Option<(u64, u64)> {
+    use windows_sys::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+    let mut info = SHQUERYRBINFO { cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32, i64Size: 0, i64NumItems: 0 };
+    // SAFETY: no root path means every drive; `info` is initialised with its size, as the call requires.
+    let hr = unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) };
+    // The structure is packed: copy the fields out instead of borrowing them.
+    let (size, items) = (info.i64Size, info.i64NumItems);
+    (hr >= 0).then(|| (size.max(0) as u64, items.max(0) as u64))
+}
+
+#[cfg(not(windows))]
+pub fn recycle_bin_info() -> Option<(u64, u64)> {
+    None
+}
+
+/// Empty the Recycle Bin of every drive, without Windows' own confirmation (the caller has asked the user).
+#[cfg(windows)]
+pub fn empty_recycle_bin() -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::{SHEmptyRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND};
+    // SAFETY: no owner window and no root path (every drive); the flags only silence Windows' own dialogs.
+    let hr = unsafe { SHEmptyRecycleBinW(std::ptr::null_mut(), std::ptr::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) };
+    if hr >= 0 {
+        Ok(())
+    } else {
+        Err(format!("code 0x{:08X}", hr as u32))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn empty_recycle_bin() -> Result<(), String> {
+    Err("Recycle Bin is only supported on Windows".into())
+}
+
 #[cfg(all(test, windows))]
 mod tests {
+    /// Read-only: the size query answers on a real Windows (the Recycle Bin itself is never emptied by a test).
+    #[test]
+    fn the_recycle_bin_size_can_be_read() {
+        let info = super::recycle_bin_info();
+        assert!(info.is_some(), "SHQueryRecycleBin failed");
+    }
+
     #[test]
     fn recycles_a_folder() {
         let d = tempfile::tempdir().unwrap();
