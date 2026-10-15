@@ -1,0 +1,19 @@
+# TEMPLATE of the winget default-locale manifest.
+PackageIdentifier: LaurentVolff.Strata
+PackageVersion: <VERSION>
+PackageLocale: en-US
+Publisher: Laurent Volff
+PublisherUrl: https://github.com/laurentvv
+PackageName: Strata
+PackageUrl: https://github.com/laurentvv/strata
+License: MIT
+LicenseUrl: https://github.com/laurentvv/strata/blob/main/LICENSE
+ShortDescription: A fast disk space analyzer with a live treemap, scan history and clean-up tools.
+Moniker: strata
+Tags:
+  - disk-usage
+  - treemap
+  - disk-space
+  - cleanup
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

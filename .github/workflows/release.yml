@@ -50,6 +50,31 @@ jobs:
           if ($hits) { $hits; throw 'build-machine paths are embedded in strata.exe' }
           if ($text -match '(?i)vcruntime140') { throw 'strata.exe still needs the Visual C++ runtime DLL' }
           'No build-machine paths found, no Visual C++ runtime dependency.'
+      - name: Build the per-user MSI
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          dotnet tool install --global wix --version 5.0.2
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $msi = "strata-$tag-windows-x64.msi"
+          wix build installer/strata.wxs -arch x64 -d Version=$version -d StrataExe=target/release/strata.exe -o $msi
+          if ($LASTEXITCODE -ne 0) { throw 'wix build failed' }
+          "MSI=$msi" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+      - name: Test the MSI on the runner (install, run, uninstall)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Strata'
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$env:MSI`"", '/qn', '/l*v', 'install.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 40; throw "install failed: $($p.ExitCode)" }
+          if (-not (Test-Path "$dir\strata.exe")) { throw 'strata.exe was not installed in the per-user folder' }
+          & "$dir\strata.exe" --version
+          $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Strata\Strata.lnk'
+          if (-not (Test-Path $lnk)) { throw 'the Start menu shortcut is missing' }
+          $p = Start-Process msiexec.exe -ArgumentList '/x', "`"$env:MSI`"", '/qn', '/l*v', 'uninstall.log' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content uninstall.log -Tail 40; throw "uninstall failed: $($p.ExitCode)" }
+          if (Test-Path "$dir\strata.exe") { throw 'strata.exe is still there after uninstall' }
+          if (Test-Path $lnk) { throw 'the shortcut is still there after uninstall' }
+          'MSI installs per user, runs and uninstalls cleanly.'
       - name: Package
         shell: pwsh
         run: |
@@ -64,12 +89,17 @@ jobs:
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
           "ASSET=$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "SHA256 $hash"
+          $msiHash = (Get-FileHash $env:MSI -Algorithm SHA256).Hash.ToLower()
+          "$msiHash  $env:MSI" | Out-File -Encoding ascii "$env:MSI.sha256"
+          "SHA256 $msiHash"
       - uses: actions/upload-artifact@v4
         with:
           name: strata-windows-x64
           path: |
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
+            ${{ env.MSI }}
+            ${{ env.MSI }}.sha256
       - name: Create the draft release
         if: github.ref_type == 'tag'
         shell: pwsh
@@ -77,4 +107,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $notes = if (Test-Path RELEASE_NOTES.md) { @('--notes-file', 'RELEASE_NOTES.md') } else { @('--generate-notes') }
-          gh release create $env:GITHUB_REF_NAME --draft --title "Strata $env:GITHUB_REF_NAME" @notes $env:ASSET "$env:ASSET.sha256"
+          gh release create $env:GITHUB_REF_NAME --draft --title "Strata $env:GITHUB_REF_NAME" @notes $env:ASSET "$env:ASSET.sha256" $env:MSI "$env:MSI.sha256"

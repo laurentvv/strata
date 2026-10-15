@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Per-user installer for Strata: no administrator rights, installs to %LOCALAPPDATA%\Programs\Strata, adds a
+  Start menu shortcut and an uninstall entry. Build (from the repository root):
+    wix build installer/strata.wxs -arch x64 -d Version=0.1.0 -d StrataExe=target/release/strata.exe -o strata.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Strata" Manufacturer="Laurent Volff" Version="$(Version)"
+           UpgradeCode="B0255A40-63E9-4056-92CB-49F67482F55F" Scope="perUser" Compressed="yes"
+           Language="1033" InstallerVersion="500">
+    <SummaryInformation Description="Strata - a fast disk space analyzer" />
+    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Strata is already installed." />
+
+    <Icon Id="StrataIcon" SourceFile="assets/icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="StrataIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/laurentvv/strata" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Strata" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="StartMenuDir" Name="Strata" />
+    </StandardDirectory>
+
+    <!-- Per-user components use a registry value under HKCU as key path (hence fixed component GUIDs). -->
+    <Component Id="ProgramFiles" Directory="INSTALLFOLDER" Guid="84C852FD-19C0-495D-9108-D4E5859F5E23">
+      <File Id="StrataExe" Source="$(StrataExe)" Name="strata.exe" />
+      <File Id="License" Source="LICENSE" Name="LICENSE.txt" />
+      <RegistryValue Root="HKCU" Key="Software\Strata" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <RemoveFolder Id="RemoveInstallDir" Directory="INSTALLFOLDER" On="uninstall" />
+      <RemoveFolder Id="RemoveProgramsDirIfEmpty" Directory="ProgramsDir" On="uninstall" />
+    </Component>
+
+    <Component Id="StartMenuShortcut" Directory="StartMenuDir" Guid="565B30C5-4A3D-430F-8255-648798C4A019">
+      <Shortcut Id="StrataShortcut" Name="Strata" Description="Disk space analyzer"
+                Target="[INSTALLFOLDER]strata.exe" WorkingDirectory="INSTALLFOLDER" Icon="StrataIcon" />
+      <RegistryValue Root="HKCU" Key="Software\Strata" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      <RemoveFolder Id="RemoveStartMenuDir" Directory="StartMenuDir" On="uninstall" />
+    </Component>
+
+    <Feature Id="Main" Title="Strata" Level="1">
+      <ComponentRef Id="ProgramFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>
