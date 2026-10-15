@@ -53,6 +53,9 @@ pub struct CliOptions {
     pub changes: bool,
     /// `--cleanup`: list reclaimable folders (node_modules, build output, ...).
     pub cleanup: bool,
+    /// `--fast`: read the NTFS Master File Table of a whole drive (administrator only), falling
+    /// back to the regular scan with a message when it cannot be used.
+    pub fast: bool,
 }
 
 pub fn parse_args(args: &[String]) -> Result<CliOptions, String> {
@@ -74,6 +77,7 @@ pub fn parse_args(args: &[String]) -> Result<CliOptions, String> {
             }
             "--changes" => o.changes = true,
             "--cleanup" => o.cleanup = true,
+            "--fast" => o.fast = true,
             other if !other.starts_with('-') => o.target = PathBuf::from(other),
             other => return Err(format!("unknown option {other}")),
         }
@@ -128,7 +132,21 @@ pub fn run(args: &[String]) {
     let abs = normalize_root(&canon);
     println!("\n  {} - {}", "Strata".bold().yellow(), "CLI mode".white());
     println!("  Target: {}\n", abs.display().to_string().cyan());
-    let res = scan_simple(&abs);
+    let res = if opts.fast {
+        let (progress, cancel) = (crate::scan::walker::Progress::default(), std::sync::atomic::AtomicBool::new(false));
+        match crate::scan::mft::try_fast_scan(&abs, &progress, &cancel, &[]) {
+            Ok(r) => {
+                println!("  Mode: NTFS Master File Table\n");
+                r
+            }
+            Err(msg) => {
+                eprintln!("  {msg}\n");
+                scan_simple(&abs)
+            }
+        }
+    } else {
+        scan_simple(&abs)
+    };
     print_node(&res.tree, 0, "", true, max_depth, 0);
     let root = res.tree.root().expect("root");
     println!(
@@ -171,7 +189,8 @@ mod tests {
     #[test]
     fn parses_flags_and_rejects_bad_ones() {
         let o = parse_args(&a(&["C:\\data", "-d", "5", "--export", "out.CSV", "--changes", "--cleanup"])).unwrap();
-        assert_eq!((o.max_depth, o.changes, o.cleanup), (5, true, true));
+        assert_eq!((o.max_depth, o.changes, o.cleanup, o.fast), (5, true, true, false));
+        assert!(parse_args(&a(&["D:\\", "--fast"])).unwrap().fast);
         assert_eq!(o.target, PathBuf::from("C:\\data"));
         assert_eq!(o.export, Some(PathBuf::from("out.CSV")));
         assert_eq!(parse_args(&a(&[])).unwrap().max_depth, 3);
