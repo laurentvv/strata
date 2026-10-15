@@ -1,0 +1,11 @@
+# TEMPLATE of the winget installer manifest (per-user MSI built by the Release workflow).
+PackageIdentifier: LaurentVolff.Strata
+PackageVersion: <VERSION>
+InstallerType: wix
+Scope: user
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/laurentvv/strata/releases/download/v<VERSION>/strata-v<VERSION>-windows-x64.msi
+    InstallerSha256: <SHA256 of the .msi, from the .sha256 file of the release>
+ManifestType: installer
+ManifestVersion: 1.6.0
