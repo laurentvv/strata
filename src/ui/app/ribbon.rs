@@ -60,6 +60,7 @@ pub(super) const HINTS: &[(&str, &str)] = &[
     ("Duplicates", "Find identical files and see what deleting the extra copies would free."),
     ("Clean-up", "Folders that can usually be deleted safely (build output, caches...) and empty folders."),
     ("File age", "How much space was last modified in each age range."),
+    ("System space", "Windows' own big files and folders that are easy to overlook, with how to reduce them."),
     ("Filter", "Show only files matching a name, size, date or type."),
     ("Clear filter", "Remove the filter and show everything again."),
     ("Hide empty folders", "Do not list folders that hold no data."),
@@ -257,6 +258,7 @@ impl App {
                             (ViewKind::Duplicates, Icon::Dupes, "Duplicates"),
                             (ViewKind::Cleanup, Icon::Exclude, "Clean-up"),
                             (ViewKind::Age, Icon::Oldest, "File age"),
+                            (ViewKind::System, Icon::Drive, "System space"),
                         ] {
                             self.big(ui, &mut out, Cmd::SetView(v), ic, l);
                         }
@@ -271,11 +273,6 @@ impl App {
                         self.big(ui, &mut out, Cmd::SetView(ViewKind::Compare), Icon::Oldest, "Changes");
                         self.big(ui, &mut out, Cmd::SnapshotCompare, Icon::Open, "Compare...");
                         self.big(ui, &mut out, Cmd::SnapshotSave, Icon::Export, "Snapshot...");
-                    });
-                    group(ui, &tr("Scan"), |ui| {
-                        if big_button(ui, Icon::Bolt, "Fast NTFS (admin)", !scanning, self.fast_ntfs).clicked() {
-                            out = Some(Cmd::ToggleFast);
-                        }
                     });
                 }
                 2 => {
@@ -337,19 +334,26 @@ impl App {
                         }
                     });
                 }
-                3 => group(ui, &tr("Options"), |ui| {
-                    let resp = big_button(ui, Icon::Types, "Language", true, false);
-                    egui::Popup::menu(&resp).show(|ui| {
-                        super::dialogs::language_choices(ui, &mut self.settings.language);
+                3 => {
+                    group(ui, &tr("Options"), |ui| {
+                        let resp = big_button(ui, Icon::Types, "Language", true, false);
+                        egui::Popup::menu(&resp).show(|ui| {
+                            super::dialogs::language_choices(ui, &mut self.settings.language);
+                        });
+                        let resp = big_button(ui, Icon::Chart, "Style", true, false);
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.selectable_value(&mut self.settings.theme, Theme::Auto, tr("Detect automatically"));
+                            ui.selectable_value(&mut self.settings.theme, Theme::Light, tr("Light"));
+                            ui.selectable_value(&mut self.settings.theme, Theme::Dark, tr("Dark"));
+                        });
+                        self.big(ui, &mut out, Cmd::Options, Icon::Options, "Options");
                     });
-                    let resp = big_button(ui, Icon::Chart, "Style", true, false);
-                    egui::Popup::menu(&resp).show(|ui| {
-                        ui.selectable_value(&mut self.settings.theme, Theme::Auto, tr("Detect automatically"));
-                        ui.selectable_value(&mut self.settings.theme, Theme::Light, tr("Light"));
-                        ui.selectable_value(&mut self.settings.theme, Theme::Dark, tr("Dark"));
+                    group(ui, &tr("Scan"), |ui| {
+                        if big_button(ui, Icon::Bolt, "Fast NTFS (admin)", !scanning, self.fast_ntfs).clicked() {
+                            out = Some(Cmd::ToggleFast);
+                        }
                     });
-                    self.big(ui, &mut out, Cmd::Options, Icon::Options, "Options");
-                }),
+                }
                 _ => group(ui, &cap("GrpHelpTitleAction", "Help"), |ui| {
                     self.big(ui, &mut out, Cmd::About, Icon::About, "About");
                 }),

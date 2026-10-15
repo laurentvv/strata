@@ -3,6 +3,7 @@ mod deletion;
 mod dialogs;
 mod recycle;
 mod ribbon;
+mod system;
 #[cfg(test)]
 mod ui_tests;
 
@@ -358,6 +359,9 @@ pub struct App {
     oldest_cache: Option<Vec<views::RankedRow>>,
     cleanup_cache: Option<Vec<views::CleanRow>>,
     age_cache: Option<Vec<AgeBucket>>,
+    /// "System space" view: what the scan found, and the command last copied.
+    system_cache: Option<Vec<crate::analysis::system_space::Found>>,
+    system_copied: Option<String>,
     dup_run: Option<DupRun>,
     dup_result: Option<Vec<DupGroup>>,
     dup_min: String,
@@ -489,6 +493,7 @@ pub fn parse_view(name: &str) -> Option<ViewKind> {
         "compare" => ViewKind::Compare,
         "cleanup" => ViewKind::Cleanup,
         "age" => ViewKind::Age,
+        "system" => ViewKind::System,
         _ => return None,
     })
 }
@@ -713,6 +718,8 @@ impl App {
             oldest_cache: None,
             cleanup_cache: None,
             age_cache: None,
+            system_cache: None,
+            system_copied: None,
             dup_run: None,
             dup_result: None,
             dup_min: "64KB".into(),
@@ -1043,6 +1050,7 @@ impl App {
         self.oldest_cache = None;
         self.cleanup_cache = None;
         self.age_cache = None;
+        self.system_cache = None;
         self.find_stale = true;
     }
 
@@ -2154,6 +2162,10 @@ impl App {
             self.insight_view(ui);
             return;
         }
+        if self.view == ViewKind::System {
+            self.system_view(ui);
+            return;
+        }
         if self.view == ViewKind::Compare {
             let mut pick = None;
             let open = views::compare_view(ui, self.comparison.as_ref().map(|c| (c.label.as_str(), c.taken, c.changes.as_slice())), &self.size_history, &mut pick, &self.compare_notice, self.loaded.as_ref().map(|l| l.tree.name(Tree::ROOT)));
@@ -2216,7 +2228,7 @@ impl App {
             ViewKind::Oldest => {
                 ev = views::file_list_view(ui, self.oldest_cache.as_deref().unwrap_or(&[]), "oldest", self.selected)
             }
-            ViewKind::Tree | ViewKind::Duplicates | ViewKind::Compare | ViewKind::Cleanup | ViewKind::Age => {}
+            ViewKind::Tree | ViewKind::Duplicates | ViewKind::Compare | ViewKind::Cleanup | ViewKind::Age | ViewKind::System => {}
         }
         let ctx = ui.ctx().clone();
         self.list_event(&ctx, ev);
@@ -2603,7 +2615,7 @@ impl App {
     /// After a scan without administrator rights: what may be missing and how to fix it.
     fn admin_banner(&mut self, ui: &mut egui::Ui) {
         let Some(hint) = self.admin_hint else { return };
-        let (mut restart, mut show, mut dismiss) = (false, false, false);
+        let (mut restart, mut show, mut dismiss, mut explain) = (false, false, false, false);
         egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(tr("This result may be incomplete: Strata is not running as administrator.")).strong());
@@ -2622,12 +2634,19 @@ impl App {
                 if hint.denied > 0 {
                     show = ui.button(tr("Show the folders")).clicked();
                 }
+                if hint.missing.is_some() {
+                    explain = ui.button(tr("What is this?")).on_hover_text(tr("See what takes space outside your folders.")).clicked();
+                }
                 dismiss = ui.button(tr("Dismiss")).clicked();
             });
         });
         ui.add_space(4.0);
         if show {
             self.show_errors = true;
+        }
+        if explain {
+            let ctx = ui.ctx().clone();
+            self.run_cmd(&ctx, Cmd::SetView(ViewKind::System));
         }
         if dismiss {
             self.admin_hint = None;

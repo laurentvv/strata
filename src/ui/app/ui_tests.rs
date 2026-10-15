@@ -298,6 +298,42 @@ fn frames(language: &str, size: egui::Vec2, setup: impl FnOnce(&mut App)) -> egu
     last.unwrap()
 }
 
+/// Like `frames`, but for an app that has scanned `root` first; `after` runs once the scan is done.
+fn frames_after_scan(root: &Path, language: &str, size: egui::Vec2, after: impl FnOnce(&mut App)) -> egui::FullOutput {
+    let ctx = egui::Context::default();
+    let st = Settings { language: language.into(), show_map: false, ..Settings::default() };
+    let mut app = App::new(&ctx, st, &RunOptions::default());
+    app.persist_enabled = false;
+    app.settings_path = None;
+    app.path_text = root.to_string_lossy().into_owned();
+    app.start_scan();
+    let run = |app: &mut App, i: usize| {
+        let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, size)), time: Some(i as f64 * 0.1), ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        out
+    };
+    let mut i = 0;
+    while (app.handle.is_some() || app.loaded.is_none()) && i < 600 {
+        run(&mut app, i);
+        i += 1;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.handle.is_none() && app.loaded.is_some(), "the scan did not finish");
+    after(&mut app);
+    let mut last = None;
+    for k in 0..4 {
+        last = Some(run(&mut app, i + k));
+    }
+    last.unwrap()
+}
+
+/// Every item of the System space view, as if a whole drive had been scanned by a normal user.
+fn all_system_items() -> Vec<crate::analysis::system_space::Found> {
+    use crate::analysis::system_space::{Found, Item, Presence};
+    Item::ALL.iter().map(|&item| Found { item, size: 12 << 30, presence: if item == Item::RestorePoints { Presence::Unreadable } else { Presence::Found } }).collect()
+}
+
 #[test]
 fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
     let _g = lock();
@@ -318,6 +354,14 @@ fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
             a.bin.confirm = true;
         });
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] Recycle Bin banner and confirmation: {t}")));
+        let fx = fixture();
+        let out = frames_after_scan(&fx.root, lang, egui::vec2(1200.0, 2800.0), |a| {
+            a.view = ViewKind::System;
+            a.system_cache = Some(all_system_items());
+            a.bin.info = Some((3 << 30, 10));
+            a.bin.queried = true;
+        });
+        problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] System space view: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_options = true);
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] options window: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_about = true);
@@ -533,6 +577,9 @@ fn the_after_scan_banner_says_what_is_missing_and_can_open_the_list() {
     let p = center_of(&h, "Show the folders");
     click_at(&mut h, p, PointerButton::Primary);
     assert!(h.state().show_errors, "the list of folders opens");
+    let p = center_of(&h, "What is this?");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert_eq!(h.state().view, ViewKind::System, "the gap is explained in the System space view");
     let p = center_of(&h, "Dismiss");
     click_at(&mut h, p, PointerButton::Primary);
     assert!(h.state().admin_hint.is_none());
@@ -652,4 +699,36 @@ fn the_common_folder_names_are_translated() {
     for t in ["Common folders", "Your user folder", "Downloads", "Desktop", "Documents", "App data", "All users", "Temporary files"] {
         assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
     }
+}
+
+#[test]
+fn the_system_space_view_lists_what_was_found_and_copies_the_commands() {
+    use crate::analysis::system_space::{Found, Item, Presence};
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    h.state_mut().system_cache = Some(vec![
+        Found { item: Item::Hibernation, size: 8 << 30, presence: Presence::Found },
+        Found { item: Item::RestorePoints, size: 0, presence: Presence::Unreadable },
+        Found { item: Item::ComponentStore, size: 18 << 30, presence: Presence::Found },
+        Found { item: Item::DriverStore, size: 0, presence: Presence::Absent },
+        Found { item: Item::RecycleBin, size: 0, presence: Presence::Absent },
+    ]);
+    h.state_mut().bin.info = Some((3 << 30, 10));
+    h.state_mut().bin.queried = true;
+    h.state_mut().view = ViewKind::System;
+    h.run_steps(4);
+    for t in ["Hibernation file (hiberfil.sys)", "Windows component store (WinSxS)", "Restore points and shadow copies", "Recycle Bin", "8.0 GB", "18.0 GB", "3.0 GB"] {
+        assert!(h.query_by_label(t).is_some(), "{t}");
+    }
+    assert!(h.query_by_label_contains("Not readable without administrator rights").is_some(), "what could not be sized says so");
+    assert!(h.query_by_label_contains("Not found in this scan:").is_some());
+    assert!(h.query_by_label_contains("Driver store").is_some(), "absent items are named in the last line");
+    assert!(h.query_by_label_contains("Scan a whole drive").is_some(), "a scan of a folder says it is partial");
+    assert!(h.query_by_label("Empty the Recycle Bin (3.0 GB)").is_some(), "the bin can be emptied from here");
+    // The topmost "Copy" belongs to the first card (what could not be sized comes first).
+    let copy = h.get_all_by_label("Copy").min_by(|a, b| a.rect().center().y.total_cmp(&b.rect().center().y)).unwrap().rect().center();
+    click_at(&mut h, copy, PointerButton::Primary);
+    assert_eq!(h.state().system_copied.as_deref(), Some("vssadmin list shadowstorage"));
+    assert!(h.query_by_label("Copied").is_some(), "the click is acknowledged");
 }

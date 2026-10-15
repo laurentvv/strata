@@ -28,6 +28,10 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   freed once it is emptied and offers to empty it (after asking: it empties the whole bin, and shows its size).
   "Delete permanently" is an unticked option of the confirmation; drive roots, the Windows and program folders and
   the profile folders themselves are always refused. Deletions run in the background with progress and a Stop button.
+- **System space**: the Windows files that are easy to overlook (hibernation and paging files, restore points,
+  the Recycle Bin, the component store `WinSxS`, update downloads, `Windows.old`...) with their size, what they are
+  and how to reduce them, using Microsoft's own commands that you copy and run as administrator. Strata deletes
+  nothing there. For a whole drive it also shows the gap between what the drive reports and what was found.
 - **Explorer-like actions**: right-click menu on every row (open, terminal, rename, new folder,
   rescan one folder, copy path, properties), Ctrl/Shift multi-selection, keyboard navigation,
   drag a folder onto the window to scan it.
@@ -44,7 +48,7 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
 | | |
 |---|---|
 | ![Treemap](docs/screenshots/treemap.png) | ![Clean-up](docs/screenshots/cleanup.png) |
-| ![Live scan](docs/screenshots/live_scan.png) | ![View tab and map options](docs/screenshots/ribbon_view.png) |
+| ![Live scan](docs/screenshots/live_scan.png) | ![System space](docs/screenshots/system_space.png) |
 
 ## Install
 
@@ -101,7 +105,7 @@ cargo run --release -- --cli PATH -d 3   # headless tree
 cargo test                               # unit tests and windowless UI tests
 ```
 
-Developer flags: `--screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N] [--dialog options|about] [--lang fr] PATH`
+Developer flags: `--screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age|system] [--tab N] [--dialog options|about] [--lang fr] PATH`
 renders one frame and exits (this is how the pictures above are made); `--screenshot-live` captures during the scan.
 `--simulate-no-opengl` makes the OpenGL set-up fail to test the DirectX fallback, and `--simulate-start-failure`
 shows the message of a window that cannot be created.
