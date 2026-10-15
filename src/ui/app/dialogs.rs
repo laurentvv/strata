@@ -117,6 +117,7 @@ impl App {
             section(ui, &tr("Scan"));
             ui.checkbox(&mut self.fast_ntfs, tr("Fast NTFS scan (admin)"));
             ui.checkbox(&mut self.settings.always_admin, tr("Always start as administrator"));
+            ui.checkbox(&mut self.settings.warn_not_admin, tr("Warn when not running as administrator"));
             if cfg!(windows) {
                 let mut on = *self.explorer_menu.get_or_insert_with(|| crate::shell_ext::is_installed(crate::shell_ext::KEY_NAME));
                 if ui.checkbox(&mut on, tr("Show in the Explorer context menu")).changed() {

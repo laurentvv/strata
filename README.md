@@ -29,7 +29,10 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
 - **Explorer-like actions**: right-click menu on every row (open, terminal, rename, new folder,
   rescan one folder, copy path, properties), Ctrl/Shift multi-selection, keyboard navigation,
   drag a folder onto the window to scan it.
-- **Restart as administrator** from the app (banner after "access denied" folders, or always).
+- **Honest about what it cannot read**: without administrator rights, the start page explains what may be
+  missing, and after a scan a banner counts the folders refused ("access denied"), lists them, and for a whole
+  drive compares what the drive reports as used with what was found. One click restarts Strata as
+  administrator (or always, in Options); the reminder can be turned off.
 - **Command line** for scripts: `strata --cli PATH --export report.csv|json|html --changes --cleanup`;
   `--fast` reads the NTFS Master File Table of a whole drive (administrator only).
 - English and French interface; light and dark theme.

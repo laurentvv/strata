@@ -35,6 +35,11 @@ impl ScanHandle {
     }
 }
 
+/// Scan errors caused by "access denied" (Win32 error 5; the message text itself is localised).
+pub fn access_denied_count(errors: &[ScanError]) -> usize {
+    errors.iter().filter(|e| e.message.contains("(os error 5)")).count()
+}
+
 /// Used bytes of the volume holding `root`, only when `root` is a drive root (for a progress estimate).
 #[cfg(windows)]
 pub fn drive_used_bytes(root: &std::path::Path) -> Option<u64> {

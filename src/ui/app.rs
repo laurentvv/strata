@@ -19,7 +19,7 @@ use crate::export;
 use crate::fmt;
 use crate::i18n::{self, tr};
 use crate::scan::model::DirectFiles;
-use crate::scan::{self, format_bytes, format_time, model::normalize_root, NodeId, ScanHandle, ScanMsg, Tree, NONE};
+use crate::scan::{self, access_denied_count, format_bytes, format_time, model::normalize_root, NodeId, ScanHandle, ScanMsg, Tree, NONE};
 use crate::settings::{self, SizeMode, Settings, SortKey as SortCol, Theme, Units, ViewKind, WindowGeom};
 use eframe::egui::{self, Color32, RichText, Sense, Stroke};
 use egui_extras::{Column, TableBuilder};
@@ -164,9 +164,23 @@ fn nav_target(ids: &[Option<NodeId>], cur: Option<usize>, delta: i32) -> Option<
     last_ok
 }
 
-/// Scan errors caused by "access denied" (Win32 error 5; the message text itself is localised).
-fn access_denied_count(errors: &[scan::ScanError]) -> usize {
-    errors.iter().filter(|e| e.message.contains("(os error 5)")).count()
+/// What a scan without administrator rights may have missed: folders refused with "access denied" and, for a
+/// whole drive, space the drive reports as used that the scan did not find.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdminHint {
+    denied: usize,
+    /// (used by the drive, found by the scan) in bytes; only when the gap is big enough to matter.
+    missing: Option<(u64, u64)>,
+}
+
+/// The hint to show after a scan, if any: `drive_used` is the drive's used space when a whole drive was scanned.
+fn admin_hint(warn: bool, denied: usize, drive_used: Option<u64>, found: u64) -> Option<AdminHint> {
+    if !warn {
+        return None;
+    }
+    let big_gap = |used: u64| used.saturating_sub(found) >= (1u64 << 30).max(used / 20);
+    let missing = drive_used.filter(|&used| big_gap(used)).map(|used| (used, found));
+    (denied > 0 || missing.is_some()).then_some(AdminHint { denied, missing })
 }
 
 /// Columns of the tree table, left to right: the Options flags and the hidden set combined.
@@ -385,8 +399,10 @@ pub struct App {
     /// Files waiting for confirmation before going to the Recycle Bin (duplicate clean-up).
     comparison: Option<Comparison>,
     size_history: Vec<snapshot::HistoryPoint>,
-    /// Number of folders refused with "access denied" in the last scan (offers an elevated restart).
-    admin_hint: Option<usize>,
+    /// What the last scan may have missed for lack of administrator rights (offers an elevated restart).
+    admin_hint: Option<AdminHint>,
+    /// Running without administrator rights where that matters (Windows, not a screenshot).
+    not_admin: bool,
     scroll_to: Option<usize>,
     find_open: bool,
     /// Explorer context-menu entry installed? (read lazily when Options opens)
@@ -682,6 +698,7 @@ impl App {
             comparison: None,
             size_history: Vec::new(),
             admin_hint: None,
+            not_admin: cfg!(windows) && !scan::mft::is_elevated() && opts.screenshot.is_none(),
             scroll_to: None,
             find_open: false,
             explorer_menu: None,
@@ -878,7 +895,9 @@ impl App {
             self.dup_result = None;
             self.status = if res.cancelled { tr("Scan cancelled") } else { tr("Scan complete") };
             let denied = access_denied_count(&res.errors);
-            self.admin_hint = (denied > 0 && cfg!(windows) && !scan::mft::is_elevated() && self.shot.is_none()).then_some(denied);
+            let drive_used = if res.cancelled { None } else { scan::drive_used_bytes(&res.root) };
+            let found = res.tree.get(Tree::ROOT).alloc;
+            self.admin_hint = if self.not_admin { admin_hint(self.settings.warn_not_admin, denied, drive_used, found) } else { None };
             self.loaded = Some(Loaded {
                 tree: res.tree,
                 root: res.root,
@@ -2537,21 +2556,59 @@ impl App {
         self.list_event(&ctx, ev);
     }
 
-    /// Offer an elevated restart when folders were refused.
+    /// After a scan without administrator rights: what may be missing and how to fix it.
     fn admin_banner(&mut self, ui: &mut egui::Ui) {
-        let Some(n) = self.admin_hint else { return };
-        let mut restart = false;
-        let mut dismiss = false;
+        let Some(hint) = self.admin_hint else { return };
+        let (mut restart, mut show, mut dismiss) = (false, false, false);
         egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(tr("This result may be incomplete: Strata is not running as administrator.")).strong());
+            if hint.denied > 0 {
+                ui.label(format!("{} {}", fmt::group_int(hint.denied as u64), tr("folders could not be read (access denied).")));
+            }
+            if let Some((used, found)) = hint.missing {
+                let l = fmt::loc();
+                let text = tr("The drive reports {used} in use, but only {found} was found.")
+                    .replace("{used}", &fmt::format_bytes_short_in(used, l))
+                    .replace("{found}", &fmt::format_bytes_short_in(found, l));
+                ui.label(text);
+            }
             ui.horizontal(|ui| {
-                ui.label(format!("{} {}", fmt::group_int(n as u64), tr("folders could not be read (access denied).")));
-                restart = ui.button(tr("Restart as Administrator")).clicked();
+                restart = ui.button(tr("Restart as Administrator")).on_hover_text(tr("Relaunch Strata with administrator rights to read protected folders.")).clicked();
+                if hint.denied > 0 {
+                    show = ui.button(tr("Show the folders")).clicked();
+                }
                 dismiss = ui.button(tr("Dismiss")).clicked();
             });
         });
         ui.add_space(4.0);
+        if show {
+            self.show_errors = true;
+        }
         if dismiss {
             self.admin_hint = None;
+        }
+        if restart {
+            let ctx = ui.ctx().clone();
+            self.run_cmd(&ctx, Cmd::RestartAdmin);
+        }
+    }
+
+    /// On the start page: say, before any scan, what running without administrator rights costs.
+    fn start_notice(&mut self, ui: &mut egui::Ui) {
+        let (mut restart, mut never) = (false, false);
+        egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(tr("Strata is running without administrator rights.")).strong());
+            ui.label(tr("Some folders (other users' profiles, System Volume Information, parts of Windows) cannot be read, so sizes can be lower than what the drive really holds. Administrator mode also allows the fast NTFS scan."));
+            ui.horizontal(|ui| {
+                restart = ui.button(tr("Restart as Administrator")).on_hover_text(tr("Relaunch Strata with administrator rights to read protected folders.")).clicked();
+                never = ui.button(tr("Don't show again")).on_hover_text(tr("You can turn this reminder back on in Options.")).clicked();
+            });
+        });
+        ui.add_space(10.0);
+        if never {
+            self.settings.warn_not_admin = false;
         }
         if restart {
             let ctx = ui.ctx().clone();
@@ -2572,6 +2629,9 @@ impl App {
         ui.add_space(12.0);
         ui.label(RichText::new(tr("Pick a drive or type a path, then press Scan.")).heading());
         ui.add_space(10.0);
+        if self.not_admin && self.settings.warn_not_admin {
+            self.start_notice(ui);
+        }
         let loc = fmt::loc();
         let mut start: Option<String> = None;
         ui.horizontal_wrapped(|ui| {
@@ -3012,6 +3072,18 @@ mod tests {
         let errs = [e("Accès refusé. (os error 5)"), e("Access is denied. (os error 5)"), e("The system cannot find the path (os error 3)")];
         assert_eq!(access_denied_count(&errs), 2);
         assert_eq!(access_denied_count(&[]), 0);
+    }
+
+    #[test]
+    fn the_admin_hint_appears_only_when_something_may_be_missing() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(admin_hint(false, 5, Some(500 * GIB), 100 * GIB), None, "the user turned the reminder off");
+        assert_eq!(admin_hint(true, 0, None, 10 * GIB), None, "nothing refused, no whole-drive figure");
+        assert_eq!(admin_hint(true, 3, None, 10 * GIB), Some(AdminHint { denied: 3, missing: None }));
+        assert_eq!(admin_hint(true, 0, Some(500 * GIB), 499 * GIB), None, "a small gap is normal (metadata, shadow copies)");
+        assert_eq!(admin_hint(true, 0, Some(10 * GIB), 9 * GIB + GIB / 2), None, "under 1 GiB is not worth a message");
+        assert_eq!(admin_hint(true, 0, Some(500 * GIB), 400 * GIB), Some(AdminHint { denied: 0, missing: Some((500 * GIB, 400 * GIB)) }));
+        assert_eq!(admin_hint(true, 2, Some(500 * GIB), 499 * GIB), Some(AdminHint { denied: 2, missing: None }), "both facts are kept independent");
     }
 
     #[test]

@@ -132,6 +132,9 @@ pub struct Settings {
     pub hide_empty: bool,
     /// Relaunch elevated at start-up (UAC prompt) so protected folders can be read.
     pub always_admin: bool,
+    /// Tell the user, on the start page and after a scan, what may be missing when Strata does not run
+    /// as administrator.
+    pub warn_not_admin: bool,
     /// Proportional map docked under the tree.
     pub show_map: bool,
     /// Height of the docked map panel in points (0 = automatic).
@@ -174,6 +177,7 @@ impl Default for Settings {
             decimals: 1,
             hide_empty: false,
             always_admin: false,
+            warn_not_admin: true,
             show_map: true,
             map_height: 0.0,
             map_right: false,
@@ -272,6 +276,7 @@ mod tests {
             decimals: 2,
             hide_empty: true,
             always_admin: true,
+            warn_not_admin: false,
             show_map: false,
             map_height: 0.0,
             map_right: true,

@@ -309,6 +309,8 @@ fn no_ribbon_or_dialog_text_is_cut_off_in_english_or_french() {
             let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.ribbon_tab = tab);
             problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] ribbon tab {tab}: {t}")));
         }
+        let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.not_admin = true);
+        problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] start page admin notice: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_options = true);
         problems.extend(clipped_texts(&out).into_iter().map(|t| format!("[{lang}] options window: {t}")));
         let out = frames(lang, egui::vec2(1200.0, 900.0), |a| a.show_about = true);
@@ -475,4 +477,69 @@ fn permanent_deletion_refuses_the_profile_folder_and_leaves_it_alone() {
     wait_for_delete(&mut h);
     assert!(home.exists(), "the folder is still there");
     assert!(h.state().delete_error.as_ref().is_some_and(|e| e.contains("protected")), "{:?}", h.state().delete_error);
+}
+
+/// A start page (no scan) of an app that believes it runs without administrator rights.
+fn start_harness(not_admin: bool) -> Harness<'static, App> {
+    let ctx = egui::Context::default();
+    let st = Settings { language: "en".into(), ..Settings::default() };
+    let mut app = App::new(&ctx, st, &RunOptions::default());
+    app.persist_enabled = false;
+    app.settings_path = None;
+    app.not_admin = not_admin;
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_step_dt(0.05).build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+    h.run_steps(4);
+    h
+}
+
+#[test]
+fn the_start_page_warns_once_when_not_running_as_administrator() {
+    let _g = lock();
+    let h = start_harness(false);
+    assert!(h.query_by_label_contains("without administrator rights").is_none(), "an administrator run has nothing to warn about");
+    let mut h = start_harness(true);
+    assert!(h.query_by_label_contains("without administrator rights").is_some());
+    assert!(h.query_by_label_contains("fast NTFS scan").is_some(), "says what administrator mode brings");
+    let p = center_of(&h, "Don't show again");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(!h.state().settings.warn_not_admin, "the choice is kept in the settings");
+    assert!(h.query_by_label_contains("without administrator rights").is_none(), "and the notice goes away");
+}
+
+#[test]
+fn the_after_scan_banner_says_what_is_missing_and_can_open_the_list() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    h.state_mut().admin_hint = Some(AdminHint { denied: 1234, missing: Some((800 << 30, 700 << 30)) });
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("may be incomplete").is_some());
+    assert!(h.query_by_label_contains("1,234").is_some(), "the number of unreadable folders");
+    assert!(h.query_by_label_contains("The drive reports").is_some(), "the gap between the drive and the scan");
+    assert!(h.query_by_label_contains("800").is_some() && h.query_by_label_contains("700").is_some(), "both figures are shown");
+    let right = h.get_by_label_contains("may be incomplete").rect().right();
+    assert!(right <= 1200.0, "the banner fits the window ({right})");
+    let p = center_of(&h, "Show the folders");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().show_errors, "the list of folders opens");
+    let p = center_of(&h, "Dismiss");
+    click_at(&mut h, p, PointerButton::Primary);
+    assert!(h.state().admin_hint.is_none());
+    assert!(h.query_by_label_contains("may be incomplete").is_none());
+}
+
+#[test]
+fn the_administrator_notice_texts_are_translated() {
+    for t in [
+        "This result may be incomplete: Strata is not running as administrator.",
+        "The drive reports {used} in use, but only {found} was found.",
+        "Show the folders",
+        "Strata is running without administrator rights.",
+        "Some folders (other users' profiles, System Volume Information, parts of Windows) cannot be read, so sizes can be lower than what the drive really holds. Administrator mode also allows the fast NTFS scan.",
+        "Don't show again",
+        "You can turn this reminder back on in Options.",
+        "Warn when not running as administrator",
+    ] {
+        assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
+    }
 }
