@@ -3015,10 +3015,20 @@ fn restart_as_admin(path: &std::path::Path) -> bool {
     }
 }
 
+/// Explorer's arguments: a folder is opened itself; a file is shown selected in its folder.
+#[cfg(windows)]
+fn explorer_args(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+    if path.is_dir() {
+        vec![path.as_os_str().to_owned()]
+    } else {
+        vec![format!("/select,{}", path.display()).into()]
+    }
+}
+
 fn open_in_explorer(path: &std::path::Path) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+        let _ = std::process::Command::new("explorer").args(explorer_args(path)).spawn();
     }
     #[cfg(not(windows))]
     {
@@ -3178,6 +3188,16 @@ mod tests {
         assert_eq!(admin_hint(true, 0, Some(10 * GIB), 9 * GIB + GIB / 2), None, "under 1 GiB is not worth a message");
         assert_eq!(admin_hint(true, 0, Some(500 * GIB), 400 * GIB), Some(AdminHint { denied: 0, missing: Some((500 * GIB, 400 * GIB)) }));
         assert_eq!(admin_hint(true, 2, Some(500 * GIB), 499 * GIB), Some(AdminHint { denied: 2, missing: None }), "both facts are kept independent");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explorer_opens_a_folder_itself_and_selects_a_file() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.txt");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(explorer_args(d.path()), vec![d.path().as_os_str().to_owned()]);
+        assert_eq!(explorer_args(&f), vec![std::ffi::OsString::from(format!("/select,{}", f.display()))]);
     }
 
     #[test]
