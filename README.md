@@ -129,8 +129,8 @@ shows the message of a window that cannot be created.
   under its own name, 3 more files (in `System Volume Information`, which the normal scan may not read), and 1.2 s
   instead of 79 s on a cold cache. Compare it on your own drives with `tools/validate_mft.ps1`.
 - The DirectX fallback was checked on a PC by forcing the software adapter (`--renderer software`) and by making
-  OpenGL fail on purpose (`--simulate-no-opengl`); it has not been run inside a Hyper-V guest yet. It makes the
-  program about 5 MB bigger, and the software adapter uses a little more memory and some CPU.
+  OpenGL fail on purpose (`--simulate-no-opengl`), and a build was run in a Hyper-V virtual machine, where it works.
+  It makes the program about 5 MB bigger, and the software adapter uses a little more memory and some CPU.
 - The executable is not code-signed yet, so Windows SmartScreen may warn the first time it is run.
 - Network shares and OneDrive "online-only" files are scanned like any other folder; they have not been tested
   specifically.
