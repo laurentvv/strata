@@ -41,7 +41,7 @@ fn harness(root: &Path) -> Harness<'static, App> {
     app.settings_path = None;
     app.path_text = root.to_string_lossy().into_owned();
     app.start_scan();
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_step_dt(0.05).build_ui_state(|ui, app: &mut App| app.draw(ui), app);
     for _ in 0..600 {
         h.step();
         if h.state().handle.is_none() {
@@ -232,4 +232,28 @@ fn a_click_in_any_column_of_the_largest_list_selects_the_file() {
         click_at(&mut h, Pos2::new(x, row.y), PointerButton::Primary);
         assert_eq!(h.state().selected, Some(file), "click in list column '{caption}'");
     }
+}
+
+#[test]
+fn a_double_click_on_a_file_type_shows_only_those_files_in_the_tree() {
+    let _g = lock();
+    let fx = fixture();
+    let mut h = harness(&fx.root);
+    h.state_mut().view = ViewKind::Types;
+    h.run_steps(4);
+    let row = center_of(&h, ".bin");
+    h.event(Event::PointerMoved(row));
+    h.run_steps(2);
+    // Two clicks one frame apart (well inside the double-click delay).
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.event(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+        }
+        h.run_steps(1);
+    }
+    h.run_steps(4);
+    assert_eq!(h.state().view, ViewKind::Tree, "back to the tree");
+    assert_eq!(h.state().filter.exts, vec!["bin".to_string()]);
+    assert!(h.state().show_filters, "the filter bar is shown");
+    assert!(h.state().filter_set.is_some(), "the tree is filtered");
 }
