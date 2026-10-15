@@ -2644,6 +2644,14 @@ impl App {
                 .map(|r| views::CleanRow { id: r.id, kind: tr(r.kind), risk: r.risk, path: tree.path_of(r.id).to_string_lossy().into_owned(), size: r.size })
                 .collect();
             let empty = tr("Empty folder");
+            let old = tr("Large file, not modified for over a year");
+            rows.extend(insights::large_old_files(tree, chrono::Utc::now().timestamp(), 100 << 20, 365, 50).into_iter().map(|f| views::CleanRow {
+                id: f.id,
+                kind: old.clone(),
+                risk: insights::Risk::Check,
+                path: tree.path_of(f.id).to_string_lossy().into_owned(),
+                size: f.size,
+            }));
             rows.extend(insights::empty_dirs(tree).into_iter().map(|id| views::CleanRow { id, kind: empty.clone(), risk: insights::Risk::Safe, path: tree.path_of(id).to_string_lossy().into_owned(), size: 0 }));
             self.cleanup_cache = Some(rows);
         }
@@ -2667,6 +2675,16 @@ impl App {
                 self.ask_delete_nodes(ids);
             }
         });
+        if cfg!(windows) {
+            ui.horizontal(|ui| {
+                if ui.button(tr("Windows Disk Cleanup")).on_hover_text(tr("For Windows Update files and system logs, which Strata does not delete itself.")).clicked() {
+                    let _ = std::process::Command::new("cleanmgr.exe").spawn();
+                }
+                if ui.button(tr("Windows storage settings")).clicked() {
+                    let _ = std::process::Command::new("cmd").args(["/C", "start", "", "ms-settings:storagesense"]).spawn();
+                }
+            });
+        }
         ui.weak(tr("Tick the folders to delete. Nothing is removed without confirmation."));
         let ev = views::cleanup_list(ui, &rows, self.selected, &self.cleanup_checked);
         let ctx = ui.ctx().clone();

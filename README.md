@@ -19,7 +19,9 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   build output and dependency folders of your projects (`node_modules` with a lock file, Cargo `target`,
   .NET `bin`/`obj`, `__pycache__`, ...), browser caches, `AppData\Local\Temp`, crash dumps, package-manager
   caches, `Windows.old`; plus empty folders, duplicate files (keep one copy; hard links are not copies) and
-  size by file age. Dependency folders of installed programs and globally installed tools are never offered.
+  size by file age and big files not modified for over a year (always "Check first"). Dependency folders of
+  installed programs and globally installed tools are never offered. For what Strata does not delete itself
+  (Windows Update files, system logs) there are buttons for Windows Disk Cleanup and the storage settings.
 - **Safe by default**: deletions go to the Recycle Bin after a confirmation (a note says the space is only freed
   once it is emptied). "Delete permanently" is an unticked option of the confirmation; drive roots, the Windows
   and program folders and the profile folders themselves are always refused. Deletions run in the background with
