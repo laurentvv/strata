@@ -20,7 +20,8 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   rescan one folder, copy path, properties), Ctrl/Shift multi-selection, keyboard navigation,
   drag a folder onto the window to scan it.
 - **Restart as administrator** from the app (banner after "access denied" folders, or always).
-- **Command line** for scripts: `strata --cli PATH --export report.csv|json|html --changes --cleanup`.
+- **Command line** for scripts: `strata --cli PATH --export report.csv|json|html --changes --cleanup`;
+  `--fast` reads the NTFS Master File Table of a whole drive (administrator only, experimental).
 - English and French interface; light and dark theme.
 
 | | |

@@ -44,14 +44,21 @@ fn attach_parent_console() {}
 const USAGE: &str = "Strata - disk space analyzer
 
 Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
-       strata --cli [PATH] [-d N] [--export FILE.csv|json|html] [--changes] [--cleanup]
-                                            headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders
+       strata --cli [PATH] [-d N] [--export FILE.csv|json|html] [--changes] [--cleanup] [--fast]
+                                            headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders;
+                                            --fast reads the NTFS Master File Table of a whole drive (administrator only)
+       strata --version
        strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age] [--tab N]
                       [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let help = args.iter().any(|a| a == "-h" || a == "--help");
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        attach_parent_console();
+        println!("strata {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cli_mode = args.iter().any(|a| a == "--cli");
     if help || cli_mode {
         attach_parent_console();
