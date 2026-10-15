@@ -5,7 +5,7 @@
 //! real volume in CI (no elevation there): treat it as untested on real volumes. When the process is
 //! not elevated, or anything fails, the caller falls back to the regular walker.
 //!
-//! Known limits: hard links show under their first name only; sizes held only in `$ATTRIBUTE_LIST`
+//! Known limits: sizes held only in `$ATTRIBUTE_LIST`
 //! extension records are merged when the extension record is found, otherwise reported as 0;
 //! allocated size for resident data equals the logical size; reparse points are listed, never followed.
 
@@ -93,12 +93,27 @@ pub struct Record {
     pub base: u64,
     pub parent: Option<u64>,
     pub name: Option<String>,
+    /// Further directory entries of the same file (hard links): (parent record, name).
+    pub links: Vec<(u64, String)>,
     pub size: Option<u64>,
     pub alloc: Option<u64>,
     pub modified: Option<i64>,
     pub attrs: Option<u32>,
     /// Run list of the unnamed `$DATA` (only when requested; used to locate the MFT itself).
     pub runs: Vec<Run>,
+}
+
+/// Directory entries that are hard links are stored in the child lists as `record | (k << LINK_SHIFT)`.
+const LINK_SHIFT: u32 = 48;
+const LINK_MASK: u64 = (1 << LINK_SHIFT) - 1;
+
+/// Name of directory entry `k` of a record: 0 is its primary name, k >= 1 its (k-1)-th hard link.
+fn entry_name(r: &Record, k: u64) -> Option<&String> {
+    if k == 0 {
+        r.name.as_ref()
+    } else {
+        r.links.get(k as usize - 1).map(|(_, n)| n)
+    }
 }
 
 /// Undo the update-sequence-array protection. `None` when the record is torn/corrupt.
@@ -139,7 +154,7 @@ pub fn parse_record(buf: &mut [u8], record_size: usize, want_runs: bool) -> Opti
     }
     let used = (u32_at(buf, 0x18)? as usize).min(record_size);
     let mut off = u16_at(buf, 0x14)? as usize;
-    let mut best_ns: i32 = -1;
+    let mut names: Vec<(i32, u64, String)> = Vec::new();
     while off + 16 <= used {
         let ty = u32_at(buf, off)?;
         if ty == ATTR_END {
@@ -163,19 +178,18 @@ pub fn parse_record(buf: &mut [u8], record_size: usize, want_runs: bool) -> Opti
                 let co = u16_at(attr, 20)? as usize;
                 let c = attr.get(co..)?;
                 let ns = *c.get(0x41)? as i32;
-                // Skip DOS-only (2) names; prefer Win32 (1) / Win32+DOS (3) over POSIX (0).
-                let rank = match ns {
-                    2 => -1,
-                    0 => 0,
-                    _ => 1,
-                };
-                if rank > best_ns {
+                // Every directory entry of the file is kept (hard links have one $FILE_NAME each);
+                // the DOS-only short name (2) is not an entry of its own. Win32 (1) / Win32+DOS (3)
+                // names are listed before POSIX (0) ones, so the primary name is the Win32 one.
+                if ns != 2 {
                     let n = *c.get(0x40)? as usize;
                     let raw = c.get(0x42..0x42 + n * 2)?;
                     let u: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|p| u16::from_le_bytes(*p)).collect();
-                    rec.name = Some(String::from_utf16_lossy(&u));
-                    rec.parent = Some(u64_at(c, 0)? & 0x0000_FFFF_FFFF_FFFF);
-                    best_ns = rank;
+                    let parent = u64_at(c, 0)? & 0x0000_FFFF_FFFF_FFFF;
+                    let name = String::from_utf16_lossy(&u);
+                    if !names.iter().any(|(_, p, n)| *p == parent && *n == name) {
+                        names.push((if ns == 0 { 0 } else { 1 }, parent, name));
+                    }
                 }
             }
             ATTR_DATA if name_len == 0 => {
@@ -200,6 +214,13 @@ pub fn parse_record(buf: &mut [u8], record_size: usize, want_runs: bool) -> Opti
         }
         off += len;
     }
+    names.sort_by_key(|(rank, ..)| std::cmp::Reverse(*rank));
+    let mut names = names.into_iter();
+    if let Some((_, parent, name)) = names.next() {
+        rec.parent = Some(parent);
+        rec.name = Some(name);
+    }
+    rec.links = names.map(|(_, parent, name)| (parent, name)).collect();
     Some(rec)
 }
 
@@ -244,8 +265,18 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
         if let Some(Some(b)) = recs.get_mut(e.base as usize) {
             b.size = b.size.or(e.size);
             b.alloc = b.alloc.or(e.alloc);
-            b.name = b.name.take().or(e.name);
-            b.parent = b.parent.or(e.parent);
+            // Names found in an extension record: the first becomes the primary name when the base
+            // record has none, every other one is a further hard link.
+            let mut extra = e.links;
+            if let (Some(p), Some(n)) = (e.parent, e.name) {
+                extra.insert(0, (p, n));
+            }
+            if b.name.is_none() && !extra.is_empty() {
+                let (p, n) = extra.remove(0);
+                b.parent = Some(p);
+                b.name = Some(n);
+            }
+            b.links.extend(extra);
             b.modified = b.modified.or(e.modified);
             b.attrs = b.attrs.or(e.attrs);
         }
@@ -262,13 +293,19 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
                 kids.entry(p).or_default().push(i);
             }
         }
+        // Further hard links: entry k (1-based) is stored with k in the high bits.
+        for (k, (p, _)) in r.links.iter().enumerate() {
+            if *p != i {
+                kids.entry(*p).or_default().push(i | ((k as u64 + 1) << LINK_SHIFT));
+            }
+        }
     }
     // Exact reservation: every kept record becomes one node, one child link and one name.
     let (mut n_nodes, mut n_names) = (1usize, volume_root.len());
     for list in kids.values() {
         n_nodes += list.len();
         for &c in list {
-            n_names += recs.get(c as usize).and_then(|r| r.as_ref()).and_then(|r| r.name.as_ref()).map_or(0, |n| n.len());
+            n_names += recs.get((c & LINK_MASK) as usize).and_then(|r| r.as_ref()).and_then(|r| entry_name(r, c >> LINK_SHIFT)).map_or(0, |n| n.len());
         }
     }
     let mut tree = Tree::with_capacity(n_nodes, n_names, n_nodes);
@@ -287,10 +324,12 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
         let Some(list) = kids.get(&rn) else { continue };
         // The children of one directory get consecutive ids and are appended to the flat child array together.
         let start = tree.kids.len();
-        for &c in list {
+        for &entry in list {
+            let (c, k) = (entry & LINK_MASK, entry >> LINK_SHIFT);
             let Some(Some(r)) = recs.get(c as usize) else { continue };
-            if std::mem::replace(&mut visited[c as usize], true) {
-                continue; // hard link or cycle: keep the first placement only
+            // A directory is placed once (cycle guard); a file shows under each of its names.
+            if r.is_dir && std::mem::replace(&mut visited[c as usize], true) {
+                continue;
             }
             let attrs = r.attrs.unwrap_or(0);
             let is_link = attrs & REPARSE != 0 && r.is_dir;
@@ -302,7 +341,7 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
                 is_link,
                 ..Node::blank(nid, r.is_dir)
             };
-            let id = tree.push_node(r.name.as_deref().unwrap_or(""), n);
+            let id = tree.push_node(entry_name(r, k).map_or("", |n| n.as_str()), n);
             tree.kids.push(id);
             if r.is_dir && !is_link {
                 stack.push((c, id));
@@ -607,6 +646,19 @@ mod tests {
     }
 
     #[test]
+    fn hard_links_keep_every_name_but_not_the_dos_short_name() {
+        let mut r = record(
+            1,
+            0,
+            vec![file_name(24, "LINK~1.BIN", 2), file_name(24, "link one.bin", 1), file_name(25, "link two.bin", 1), file_name(24, "link three.bin", 1), file_name(25, "link two.bin", 1)],
+        );
+        let rec = parse_record(&mut r, RS, false).unwrap();
+        assert_eq!(rec.name.as_deref(), Some("link one.bin"));
+        assert_eq!(rec.parent, Some(24));
+        assert_eq!(rec.links, vec![(25, "link two.bin".to_string()), (24, "link three.bin".to_string())], "a repeated name is kept once");
+    }
+
+    #[test]
     fn boot_sector() {
         let mut b = vec![0u8; 512];
         b[3..11].copy_from_slice(b"NTFS    ");
@@ -651,6 +703,44 @@ mod tests {
         assert!(t.find_child(0, "orphan").is_none());
         assert!(t.find_child(0, "$Volume").is_none());
         assert_eq!(t.get(docs).modified, 1_000);
+    }
+
+    #[test]
+    fn hard_linked_files_are_listed_under_every_parent_and_counted_per_name() {
+        // 24 a (dir), 25 b (dir), 26 one file with 3 names: a/x, a/y (same directory), b/z
+        let mut recs: Vec<Option<Record>> = vec![None; 40];
+        recs[5] = parsed(dir_rec(5, "."));
+        recs[24] = parsed(dir_rec(5, "a"));
+        recs[25] = parsed(dir_rec(5, "b"));
+        recs[26] = parsed(record(
+            1,
+            0,
+            vec![std_info(7, 0x20), file_name(24, "x", 1), file_name(24, "y", 1), file_name(25, "z", 1), attr_data_nonres(8192, 8000, &[0x11, 0x02, 0x10, 0])],
+        ));
+        let t = build_tree(recs, "D:\\");
+        let (a, b) = (t.find_child(0, "a").unwrap(), t.find_child(0, "b").unwrap());
+        for (dir, name) in [(a, "x"), (a, "y"), (b, "z")] {
+            let f = t.find_child(dir, name).unwrap_or_else(|| panic!("{name} missing"));
+            assert_eq!((t.get(f).size, t.get(f).alloc, t.get(f).modified), (8000, 8192, 7));
+        }
+        // like a directory walk, every name counts
+        assert_eq!((t.get(a).files, t.get(a).size), (2, 16000));
+        assert_eq!((t.get(b).files, t.get(b).size), (1, 8000));
+        assert_eq!((t.root().unwrap().files, t.root().unwrap().size), (3, 24000));
+    }
+
+    #[test]
+    fn names_in_an_extension_record_become_links() {
+        let mut recs: Vec<Option<Record>> = vec![None; 40];
+        recs[5] = parsed(dir_rec(5, "."));
+        recs[24] = parsed(dir_rec(5, "a"));
+        recs[30] = parsed(record(1, 0, vec![std_info(1, 0x20), file_name(5, "first", 1), attr_data_nonres(4096, 10, &[0x11, 0x01, 0x10, 0])]));
+        recs[31] = parsed(record(1, 30, vec![file_name(24, "second", 1)]));
+        let t = build_tree(recs, "D:\\");
+        assert!(t.find_child(0, "first").is_some());
+        let a = t.find_child(0, "a").unwrap();
+        assert!(t.find_child(a, "second").is_some());
+        assert_eq!(t.root().unwrap().files, 2);
     }
 
     #[test]
