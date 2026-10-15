@@ -112,7 +112,7 @@ fn print_cleanup(tree: &Tree) {
     let total: u64 = found.iter().map(|f| f.size).sum();
     println!("  Reclaimable: {} in {} folders", format_bytes(total), found.len());
     for f in found.iter().take(50) {
-        println!("  {:>10}  {:<28} {}", format_bytes(f.size), f.kind, tree.path_of(f.id).display());
+        println!("  {:>10}  {:<9} {:<32} {}", format_bytes(f.size), f.risk.label(), f.kind, tree.path_of(f.id).display());
     }
     println!("  Empty folders: {}", insights::empty_dirs(tree).len());
 }

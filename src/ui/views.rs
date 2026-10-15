@@ -2,6 +2,7 @@
 
 use super::treemap::{pie_angles, Mix, Rect as TRect};
 use crate::i18n::tr;
+use crate::analysis::insights::Risk;
 use crate::analysis::types::{category_of_name, top_children, Category, TypeStat};
 use crate::scan::model::RankedFile;
 use crate::scan::{format_bytes, format_time, NodeId, Tree, NONE};
@@ -609,6 +610,7 @@ pub fn signed_bytes(d: i64) -> String {
 pub struct CleanRow {
     pub id: NodeId,
     pub kind: String,
+    pub risk: Risk,
     pub path: String,
     pub size: u64,
 }
@@ -624,11 +626,12 @@ pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeI
             .resizable(true)
             .sense(Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::initial(190.0).at_least(80.0).clip(true))
-            .column(Column::initial(520.0).at_least(120.0).clip(true))
+            .column(Column::initial(210.0).at_least(80.0).clip(true))
+            .column(Column::initial(90.0).at_least(60.0).clip(true))
+            .column(Column::initial(480.0).at_least(120.0).clip(true))
             .column(Column::remainder().at_least(80.0))
             .header(22.0, |mut h| {
-                for t in ["Category", "Path", "Size"] {
+                for t in ["Category", "Safety", "Path", "Size"] {
                     h.col(|ui| {
                         ui.label(RichText::new(tr(t)).strong());
                     });
@@ -640,6 +643,13 @@ pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeI
                     row.set_selected(selected == Some(r.id));
                     row.col(|ui| {
                         ui.label(&r.kind);
+                    });
+                    row.col(|ui| {
+                        let colour = match r.risk {
+                            Risk::Safe => super::theme::RISK_SAFE,
+                            Risk::Check => super::theme::RISK_CHECK,
+                        };
+                        ui.label(RichText::new(tr(r.risk.label())).color(colour));
                     });
                     row.col(|ui| {
                         ui.add(egui::Label::new(r.path.as_str()).truncate());

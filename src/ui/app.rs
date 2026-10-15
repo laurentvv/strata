@@ -2632,15 +2632,16 @@ impl App {
             let tree = &l.tree;
             let mut rows: Vec<views::CleanRow> = insights::reclaimable(tree)
                 .into_iter()
-                .map(|r| views::CleanRow { id: r.id, kind: tr(r.kind), path: tree.path_of(r.id).to_string_lossy().into_owned(), size: r.size })
+                .map(|r| views::CleanRow { id: r.id, kind: tr(r.kind), risk: r.risk, path: tree.path_of(r.id).to_string_lossy().into_owned(), size: r.size })
                 .collect();
             let empty = tr("Empty folder");
-            rows.extend(insights::empty_dirs(tree).into_iter().map(|id| views::CleanRow { id, kind: empty.clone(), path: tree.path_of(id).to_string_lossy().into_owned(), size: 0 }));
+            rows.extend(insights::empty_dirs(tree).into_iter().map(|id| views::CleanRow { id, kind: empty.clone(), risk: insights::Risk::Safe, path: tree.path_of(id).to_string_lossy().into_owned(), size: 0 }));
             self.cleanup_cache = Some(rows);
         }
         let rows = self.cleanup_cache.clone().unwrap_or_default();
         let total: u64 = rows.iter().map(|r| r.size).sum();
-        ui.label(RichText::new(format!("{}: {} ({} {})", tr("Can be reclaimed"), format_bytes(total), rows.len(), tr("folders"))).strong());
+        let safe: u64 = rows.iter().filter(|r| r.risk == insights::Risk::Safe).map(|r| r.size).sum();
+        ui.label(RichText::new(format!("{}: {} ({} {}) - {}: {}", tr("Can be reclaimed"), format_bytes(total), rows.len(), tr("folders"), tr("Safe"), format_bytes(safe))).strong());
         ui.horizontal(|ui| {
             let sel = self.selected.filter(|s| rows.iter().any(|r| r.id == *s));
             if ui.add_enabled(sel.is_some(), egui::Button::new(tr("Delete (Recycle Bin)"))).clicked() {
