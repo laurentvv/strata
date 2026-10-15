@@ -90,7 +90,7 @@ pub const SERIES: Color32 = TEAL;
 pub const SERIES_DIM: Color32 = rgb(30, 128, 116);
 pub const SERIES_LATEST: Color32 = AMBER;
 pub const DANGER: Color32 = rgb(210, 70, 60);
-pub const FILE_TAB: Color32 = rgb(24, 118, 108);
+pub const TAB_ACCENT: Color32 = rgb(24, 118, 108);
 
 #[cfg(test)]
 mod tests {

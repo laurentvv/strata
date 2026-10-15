@@ -1,4 +1,4 @@
-//! Compact tabbed ribbon (File / Home / Analyse / View / Options / Help); the icons are vector
+//! Compact tabbed ribbon (Home / Analyse / View / Options / Help); the icons are vector
 //! glyphs from `paint`.
 
 use super::*;
@@ -38,7 +38,6 @@ pub(super) const HINTS: &[(&str, &str)] = &[
     ("Stop Scan", "Stop the running scan and keep what was found."),
     ("Refresh", "Scan the current folder again (F5)."),
     ("New window", "Open another Strata window (Ctrl+Shift+N)."),
-    ("Exit", "Close Strata."),
     ("Size", "Sort by the size of files and folders (Ctrl+1)."),
     ("Allocated Space", "Sort by the space really used on disk (Ctrl+2)."),
     ("File Count", "Sort by the number of files (Ctrl+4)."),
@@ -159,25 +158,20 @@ impl App {
     pub(super) fn ribbon(&mut self, ui: &mut egui::Ui) -> Option<Cmd> {
         let mut out: Option<Cmd> = None;
         let names = [
-            cap("FileMenu", "&File"),
             cap("TabHomeTitleAction", "&Home"),
             cap("ScanTabTitleAction", "&Scan"),
             cap("TabViewTitleAction", "&View"),
             cap("TabOptionsTitleAction", "&Options"),
             cap("HelpTabTitleAction", "Hel&p"),
         ];
-        let accent = super::super::theme::FILE_TAB;
+        let accent = super::super::theme::TAB_ACCENT;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             for (i, n) in names.iter().enumerate() {
                 let active = self.ribbon_tab == i;
-                let text = if i == 0 { RichText::new(n).color(Color32::WHITE) } else { RichText::new(n) };
-                let resp = ui.add(egui::Label::new(text).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+                let resp = ui.add(egui::Label::new(RichText::new(n)).sense(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
                 let r = resp.rect.expand2(egui::vec2(8.0, 3.0));
-                if i == 0 {
-                    ui.painter().rect_filled(r, 0.0, accent);
-                    ui.painter().text(resp.rect.center(), egui::Align2::CENTER_CENTER, n, egui::FontId::proportional(14.0), Color32::WHITE);
-                } else if active {
+                if active {
                     ui.painter().line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(2.0, accent));
                 }
                 if resp.clicked() {
@@ -196,35 +190,6 @@ impl App {
             ui.spacing_mut().item_spacing.x = 2.0;
             match self.ribbon_tab {
                 0 => {
-                    group(ui, &tr("Scan"), |ui| {
-                        self.big(ui, &mut out, Cmd::ScanDir, Icon::Folder, "Select &Directory");
-                        let resp = big_button(ui, Icon::Open, "Recent folders", !scanning, false);
-                        egui::Popup::menu(&resp).show(|ui| {
-                            let recent = self.settings.recent.clone();
-                            if recent.is_empty() {
-                                ui.weak(tr("(none)"));
-                            }
-                            for r in recent {
-                                if ui.button(&r).clicked() {
-                                    self.path_text = r;
-                                    self.start_scan();
-                                    ui.close();
-                                }
-                            }
-                        });
-                        self.big(ui, &mut out, Cmd::Refresh, Icon::Refresh, "Refresh");
-                        self.big(ui, &mut out, Cmd::Stop, Icon::Stop, "Stop Scan");
-                    });
-                    group(ui, &tr("Window"), |ui| {
-                        self.big(ui, &mut out, Cmd::NewInstance, Icon::Files, "New window");
-                        self.big(ui, &mut out, Cmd::Exit, Icon::Exclude, "Exit");
-                    });
-                    group(ui, &tr("Application"), |ui| {
-                        self.big(ui, &mut out, Cmd::Options, Icon::Options, "Options");
-                        self.big(ui, &mut out, Cmd::About, Icon::About, "About");
-                    });
-                }
-                1 => {
                     group(ui, &cap("ScanTabTitleAction", "&Scan"), |ui| {
                         self.big(ui, &mut out, Cmd::ScanDir, Icon::Folder, "Select &Directory");
                         self.big(ui, &mut out, Cmd::Stop, Icon::Stop, "Stop Scan");
@@ -268,6 +233,7 @@ impl App {
                     });
                     group(ui, &cap("GrpToolsTitleAction", "Tools"), |ui| {
                         self.big(ui, &mut out, Cmd::RestartAdmin, Icon::Bolt, "Restart as Administrator");
+                        self.big(ui, &mut out, Cmd::NewInstance, Icon::Files, "New window");
                         let resp = big_button(ui, Icon::Export, "Export", self.loaded.is_some() && !scanning, false);
                         egui::Popup::menu(&resp).show(|ui| {
                             for (label, fmt) in [("CSV...", export::Format::Csv), ("HTML report...", export::Format::Html), ("JSON...", export::Format::Json)] {
@@ -279,7 +245,7 @@ impl App {
                         });
                     });
                 }
-                2 => {
+                1 => {
                     group(ui, &tr("Views"), |ui| {
                         for (v, ic, l) in [
                             (ViewKind::Tree, Icon::Tree, "Tree"),
@@ -312,7 +278,7 @@ impl App {
                         }
                     });
                 }
-                3 => {
+                2 => {
                     group(ui, &cap("GrpViewTitleAction", "View"), |ui| {
                         self.big(ui, &mut out, Cmd::ToggleDetails, Icon::Details, "Show Details");
                         let resp = big_button(ui, Icon::Details, "Configure columns", true, false);
@@ -371,7 +337,7 @@ impl App {
                         }
                     });
                 }
-                4 => group(ui, &tr("Options"), |ui| {
+                3 => group(ui, &tr("Options"), |ui| {
                     let resp = big_button(ui, Icon::Types, "Language", true, false);
                     egui::Popup::menu(&resp).show(|ui| {
                         super::dialogs::language_choices(ui, &mut self.settings.language);
