@@ -30,6 +30,14 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
 |---|---|
 | ![Treemap](docs/screenshots/treemap.png) | ![Clean-up](docs/screenshots/cleanup.png) |
 
+## Install
+
+Strata is a single `strata.exe`: no installer, no runtime to install (the C runtime is linked in; only
+Windows system DLLs and a graphics driver with OpenGL support are needed). Download the zip of a release,
+unpack it anywhere and run it. Settings and scan history live in `%APPDATA%\strata`; for a **portable**
+copy (USB stick, shared folder), create an empty file named `strata.portable` next to `strata.exe` and
+they are kept in `strata-data` beside it instead.
+
 ## Run
 
 ```bash

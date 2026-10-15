@@ -201,8 +201,21 @@ pub fn push_recent(list: &mut Vec<String>, path: &str, max: usize) {
     list.truncate(max);
 }
 
+/// Name of the marker file that switches Strata to portable mode when it sits next to the program.
+pub const PORTABLE_MARKER: &str = "strata.portable";
+
+/// Data folder of a portable install: `strata-data` next to `exe`, when the marker file is there too.
+pub fn portable_dir(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    dir.join(PORTABLE_MARKER).is_file().then(|| dir.join("strata-data"))
+}
+
+/// Portable mode (marker file next to the program): `strata-data` beside it. Otherwise
 /// `%APPDATA%\strata` on Windows, `$XDG_CONFIG_HOME` or `~/.config` elsewhere.
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| portable_dir(&e)) {
+        return Some(dir);
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else {
@@ -318,6 +331,15 @@ mod tests {
             assert_eq!(Units::from_u8(u.to_u8()), u);
         }
         assert_eq!(Units::from_u8(200), Units::Auto);
+    }
+
+    #[test]
+    fn portable_mode_needs_the_marker_next_to_the_program() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = d.path().join("strata.exe");
+        assert_eq!(portable_dir(&exe), None, "no marker: normal install");
+        std::fs::write(d.path().join(PORTABLE_MARKER), "").unwrap();
+        assert_eq!(portable_dir(&exe), Some(d.path().join("strata-data")));
     }
 
     #[test]

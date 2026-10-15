@@ -1,0 +1,4 @@
+# A self-contained Windows build: link the C runtime statically so strata.exe runs on a clean machine
+# without the Visual C++ Redistributable. (RUSTFLAGS in the environment replaces this setting.)
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
