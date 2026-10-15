@@ -190,25 +190,29 @@ impl Live {
     /// Consistent snapshot: directories only, totals aggregated up to the root, unfinished
     /// directories flagged `scanning`. Sizes only ever grow from one snapshot to the next.
     fn snapshot(&self) -> Tree {
-        let mut nodes: Vec<Node> = {
+        let mut tree = {
             let d = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
-            d.iter()
-                .map(|n| Node {
-                    name: n.name.clone(),
-                    parent: n.parent,
-                    children: n.kids.clone(),
+            let (names, kids) = d.iter().fold((0, 0), |(a, b), n| (a + n.name.len(), b + n.kids.len()));
+            let mut t = Tree::with_capacity(d.len(), names, kids);
+            for n in d.iter() {
+                let node = Node {
                     size: n.size,
                     alloc: n.alloc,
                     files: n.files,
                     dirs: n.dir_links,
                     modified: n.modified,
                     attrs: n.attrs,
-                    is_dir: true,
-                    is_link: false,
                     scanning: !n.done,
-                })
-                .collect()
+                    ..Node::blank(n.parent, true)
+                };
+                t.push_node(&n.name, node);
+            }
+            for (i, n) in d.iter().enumerate() {
+                t.set_children(i as NodeId, &n.kids);
+            }
+            t
         };
+        let nodes = &mut tree.nodes;
         let direct: Vec<DirectFiles> = nodes.iter().map(|n| DirectFiles { count: n.files, size: n.size, alloc: n.alloc, modified: 0 }).collect();
         for i in (1..nodes.len()).rev() {
             let (size, alloc, files, dirs, parent) = {
@@ -232,7 +236,8 @@ impl Live {
         };
         trim_largest(&mut largest);
         trim_oldest(&mut oldest);
-        Tree { nodes, live: Some(Box::new(LiveStats { direct, types, largest, oldest })) }
+        tree.live = Some(Box::new(LiveStats { direct, types, largest, oldest }));
+        tree
     }
 }
 
@@ -428,25 +433,32 @@ fn walk(path: &Path, name: String, meta: Option<&fs::Metadata>, ctx: &Ctx, lid: 
     node
 }
 
-fn flatten(t: TNode, parent: NodeId, out: &mut Vec<Node>) -> NodeId {
-    let id = out.len() as NodeId;
-    out.push(Node {
-        name: t.name,
-        parent,
-        children: Vec::with_capacity(t.children.len()),
+/// Total name bytes of a temporary tree (for exact reservation).
+fn name_bytes(t: &TNode) -> usize {
+    t.name.len() + t.children.iter().map(name_bytes).sum::<usize>()
+}
+
+fn flatten(t: TNode, parent: NodeId, out: &mut Tree) -> NodeId {
+    let node = Node {
         size: t.size,
         alloc: t.alloc,
         files: t.files,
         dirs: t.dirs,
         modified: t.modified,
         attrs: t.attrs,
-        is_dir: t.is_dir,
         is_link: t.is_link,
-        scanning: false,
-    });
-    for c in t.children {
+        ..Node::blank(parent, t.is_dir)
+    };
+    let id = out.push_node(&t.name, node);
+    // Reserve this directory's slots in the flat child array, then fill them as the children are placed.
+    let start = out.kids.len();
+    let count = t.children.len();
+    out.kids.resize(start + count, NONE);
+    out.nodes[id as usize].child_start = start as u32;
+    out.nodes[id as usize].child_len = count as u32;
+    for (i, c) in t.children.into_iter().enumerate() {
         let cid = flatten(c, id, out);
-        out[id as usize].children.push(cid);
+        out.kids[start + i] = cid;
     }
     id
 }
@@ -498,11 +510,12 @@ pub fn scan_live(root: &Path, progress: &Progress, cancel: &AtomicBool, excludes
         sink(live.snapshot());
     }
     // Exact reservation: growing by doubling would transiently need twice the arena (hundreds of MB on a big drive).
-    let mut nodes = Vec::with_capacity((troot.files + troot.dirs) as usize + 1);
-    flatten(troot, NONE, &mut nodes);
+    let count = (troot.files + troot.dirs) as usize + 1;
+    let mut tree = Tree::with_capacity(count, name_bytes(&troot), count - 1);
+    flatten(troot, NONE, &mut tree);
     ScanResult {
         root: root.to_path_buf(),
-        tree: Tree { nodes, live: None },
+        tree,
         errors: ctx.errors.into_inner().unwrap_or_default(),
         cancelled: cancel.load(Ordering::Relaxed),
         elapsed: start.elapsed(),

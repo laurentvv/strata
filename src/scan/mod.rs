@@ -159,7 +159,7 @@ mod tests {
         let res = scan_simple(d.path());
         let root = res.tree.get(Tree::ROOT);
         assert_eq!((root.files, root.dirs, root.size), (3, 3, 30));
-        let mut names: Vec<&str> = root.children.iter().map(|&c| res.tree.get(c).name.as_str()).collect();
+        let mut names: Vec<&str> = res.tree.children(Tree::ROOT).iter().map(|&c| res.tree.name(c)).collect();
         names.sort_unstable();
         assert_eq!(names, ["dossier é à", "emoji 😀", "日本語 フォルダ"]);
         assert!(res.errors.is_empty());
@@ -271,7 +271,7 @@ mod tests {
         let real = r.tree.find_child(0, "real").unwrap();
         let l = r.tree.find_child(real, "loop").unwrap();
         assert!(r.tree.get(l).is_link);
-        assert!(r.tree.get(l).children.is_empty());
+        assert!(r.tree.children(l).is_empty());
     }
 
     #[test]
@@ -333,9 +333,9 @@ mod tests {
             // totals are consistent: every directory equals its direct part plus its children
             for (i, n) in t.nodes.iter().enumerate() {
                 assert!(n.is_dir);
-                let kids: u64 = n.children.iter().map(|&c| t.get(c).size).sum();
+                let kids: u64 = t.children(i as u32).iter().map(|&c| t.get(c).size).sum();
                 assert!(n.size >= kids, "node {i} smaller than its children");
-                for &c in &n.children {
+                for &c in t.children(i as u32) {
                     assert_eq!(t.get(c).parent as usize, i);
                     assert!(c as usize > i);
                 }

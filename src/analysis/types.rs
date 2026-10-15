@@ -104,7 +104,7 @@ pub fn files_below(tree: &Tree, root: NodeId) -> Vec<NodeId> {
     while let Some(id) = stack.pop() {
         let n = tree.get(id);
         if n.is_dir {
-            stack.extend(n.children.iter().copied());
+            stack.extend(tree.children(id).iter().copied());
         } else if !n.is_link {
             out.push(id);
         }
@@ -118,7 +118,7 @@ pub fn aggregate_by_extension(tree: &Tree, root: NodeId) -> Vec<TypeStat> {
     let mut total = 0u64;
     for id in files_below(tree, root) {
         let n = tree.get(id);
-        let e = map.entry(ext_of(&n.name)).or_default();
+        let e = map.entry(ext_of(tree.name(id))).or_default();
         e.0 += 1;
         e.1 += n.size;
         e.2 += n.alloc;
@@ -195,12 +195,12 @@ pub struct Slice {
 
 /// Direct children of `id` ordered by size, at most `n` slices plus one "Other" remainder.
 pub fn top_children(tree: &Tree, id: NodeId, n: usize) -> Vec<Slice> {
-    let mut kids: Vec<NodeId> = tree.get(id).children.iter().copied().filter(|&c| tree.get(c).size > 0).collect();
+    let mut kids: Vec<NodeId> = tree.children(id).iter().copied().filter(|&c| tree.get(c).size > 0).collect();
     kids.sort_by(|&a, &b| tree.get(b).size.cmp(&tree.get(a).size).then(a.cmp(&b)));
     let mut out: Vec<Slice> = kids
         .iter()
         .take(n)
-        .map(|&c| Slice { name: tree.get(c).name.clone(), size: tree.get(c).size, node: Some(c) })
+        .map(|&c| Slice { name: tree.name(c).to_string(), size: tree.get(c).size, node: Some(c) })
         .collect();
     let rest: u64 = kids.iter().skip(n).map(|&c| tree.get(c).size).sum();
     if rest > 0 {
@@ -216,21 +216,8 @@ pub mod testutil {
     /// Build a tree from `(path, size, mtime)`; parents are created as needed.
     pub fn tree_of(files: &[(&str, u64, i64)]) -> Tree {
         let mut t = Tree::default();
-        let mk = |name: &str, parent, is_dir, size, modified| Node {
-            name: name.into(),
-            parent,
-            children: vec![],
-            size,
-            alloc: size,
-            files: 0,
-            dirs: 0,
-            modified,
-            attrs: 0,
-            is_dir,
-            is_link: false,
-            scanning: false,
-        };
-        t.nodes.push(mk("root", NONE, true, 0, 0));
+        let mk = |parent, is_dir, size, modified| Node { size, alloc: size, modified, ..Node::blank(parent, is_dir) };
+        t.push_node("root", mk(NONE, true, 0, 0));
         for (path, size, mtime) in files {
             let parts: Vec<&str> = path.split('/').collect();
             let mut cur = 0u32;
@@ -240,8 +227,10 @@ pub mod testutil {
                     Some(c) => c,
                     None => {
                         let id = t.nodes.len() as u32;
-                        t.nodes.push(mk(p, cur, !last, if last { *size } else { 0 }, if last { *mtime } else { 0 }));
-                        t.nodes[cur as usize].children.push(id);
+                        t.push_node(p, mk(cur, !last, if last { *size } else { 0 }, if last { *mtime } else { 0 }));
+                        let mut k = t.children(cur).to_vec();
+                        k.push(id);
+                        t.set_children(cur, &k);
                         id
                     }
                 };
@@ -303,11 +292,11 @@ mod tests {
     fn rankings() {
         let t = sample();
         let big = largest_files(&t, 0, 2);
-        assert_eq!(t.get(big[0]).name, "z.mp4");
-        assert_eq!(t.get(big[1]).name, "y.jpg");
+        assert_eq!(t.name(big[0]), "z.mp4");
+        assert_eq!(t.name(big[1]), "y.jpg");
         let old = oldest_files(&t, 0, 2);
-        assert_eq!(t.get(old[0]).name, "n.txt"); // mtime 5; README (0 = unknown) skipped
-        assert_eq!(t.get(old[1]).name, "y.jpg");
+        assert_eq!(t.name(old[0]), "n.txt"); // mtime 5; README (0 = unknown) skipped
+        assert_eq!(t.name(old[1]), "y.jpg");
     }
 
     #[test]

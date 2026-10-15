@@ -142,15 +142,15 @@ pub fn matching_set(tree: &Tree, filter: &Filter) -> HashSet<NodeId> {
     let mut stack = vec![Tree::ROOT];
     while let Some(id) = stack.pop() {
         order.push(id);
-        stack.extend(tree.get(id).children.iter().copied());
+        stack.extend(tree.children(id).iter().copied());
     }
     for &id in order.iter().rev() {
         let n = tree.get(id);
         if n.is_dir {
-            if n.children.iter().any(|c| set.contains(c)) {
+            if tree.children(id).iter().any(|c| set.contains(c)) {
                 set.insert(id);
             }
-        } else if filter.matches_file(&n.name, n.size, n.modified) {
+        } else if filter.matches_file(tree.name(id), n.size, n.modified) {
             set.insert(id);
         }
     }

@@ -196,7 +196,7 @@ enum Item {
 fn place_dir(tree: &Tree, id: NodeId, rect: Rect, depth: u8, opts: &NestOpts, out: &mut Vec<Tile>) {
     let node = tree.get(id);
     let head = if opts.headers { HEADER_H } else { 0.0 };
-    let wants_children = depth < opts.max_depth && node.is_dir && !node.children.is_empty();
+    let wants_children = depth < opts.max_depth && node.is_dir && !tree.children(id).is_empty();
     let can_nest = wants_children && rect.w > 36.0 && rect.h > head + 14.0;
     out.push(Tile { id, rect, depth, kind: TileKind::Folder, size: node.size, files: node.files, has_header: can_nest });
     if !can_nest {
@@ -204,10 +204,10 @@ fn place_dir(tree: &Tree, id: NodeId, rect: Rect, depth: u8, opts: &NestOpts, ou
     }
     let inner = Rect::new(rect.x + PAD, rect.y + head.max(PAD), (rect.w - 2.0 * PAD).max(0.0), (rect.h - head.max(PAD) - PAD).max(0.0));
     // Children: folders, then the files (aggregated or individual), then free space.
-    let mut items: Vec<(Item, u64)> = node.children.iter().copied().filter(|&c| tree.get(c).is_dir && tree.get(c).size > 0).map(|c| (Item::Folder(c), tree.get(c).size)).collect();
+    let mut items: Vec<(Item, u64)> = tree.children(id).iter().copied().filter(|&c| tree.get(c).is_dir && tree.get(c).size > 0).map(|c| (Item::Folder(c), tree.get(c).size)).collect();
     let direct = tree.direct_files(id);
     if opts.unique_files && tree.has_file_nodes() {
-        let mut files: Vec<NodeId> = node.children.iter().copied().filter(|&c| !tree.get(c).is_dir && tree.get(c).size > 0).collect();
+        let mut files: Vec<NodeId> = tree.children(id).iter().copied().filter(|&c| !tree.get(c).is_dir && tree.get(c).size > 0).collect();
         files.sort_by(|&a, &b| tree.get(b).size.cmp(&tree.get(a).size).then(a.cmp(&b)));
         let rest = files.split_off(files.len().min(MAX_FILE_TILES));
         items.extend(files.into_iter().map(|f| (Item::File(f), tree.get(f).size)));
@@ -280,10 +280,10 @@ mod tests {
             }
         }
         // Folder a (7000 bytes) is bigger than b (3500): bigger tile.
-        let area_of = |name: &str| tiles.iter().find(|t| t.kind == TileKind::Folder && t.depth == 1 && tree.get(t.id).name == name).map(|t| t.rect.area()).unwrap();
+        let area_of = |name: &str| tiles.iter().find(|t| t.kind == TileKind::Folder && t.depth == 1 && tree.name(t.id) == name).map(|t| t.rect.area()).unwrap();
         assert!(area_of("a") > area_of("b") * 1.8 && area_of("a") < area_of("b") * 2.2, "areas follow sizes (7000 vs 3500)");
         // The aggregated files tile of `a` exists with the owning folder id.
-        assert!(tiles.iter().any(|t| t.kind == TileKind::FilesBlock && tree.get(t.id).name == "a"));
+        assert!(tiles.iter().any(|t| t.kind == TileKind::FilesBlock && tree.name(t.id) == "a"));
         assert!(tile_at(&tiles, 400.0, 250.0).is_some());
         assert!(nested(&tree, Tree::ROOT, Rect::new(0.0, 0.0, 2.0, 2.0), 3, 100).is_empty());
     }
@@ -302,10 +302,10 @@ mod tests {
         // Unique files: one tile per file of folder a, no aggregated block.
         let o = NestOpts { max_depth: 3, unique_files: true, ..NestOpts::default() };
         let tiles = nested_with(&tree, Tree::ROOT, area, &o);
-        let files: Vec<&str> = tiles.iter().filter(|t| t.kind == TileKind::File).map(|t| tree.get(t.id).name.as_str()).collect();
+        let files: Vec<&str> = tiles.iter().filter(|t| t.kind == TileKind::File).map(|t| tree.name(t.id)).collect();
         assert!(["big.bin", "small.bin", "mid.bin", "y.bin"].iter().all(|f| files.contains(f)), "{files:?}");
         assert!(tiles.iter().all(|t| t.kind != TileKind::FilesBlock));
-        let a = |n: &str| tiles.iter().find(|t| t.kind == TileKind::File && tree.get(t.id).name == n).unwrap().rect.area();
+        let a = |n: &str| tiles.iter().find(|t| t.kind == TileKind::File && tree.name(t.id) == n).unwrap().rect.area();
         assert!(a("big.bin") > a("mid.bin") && a("mid.bin") > a("small.bin"));
 
         // Free space: a first-level tile whose area follows the byte count.
@@ -313,7 +313,7 @@ mod tests {
         let tiles = nested_with(&tree, Tree::ROOT, area, &o);
         let free = tiles.iter().find(|t| t.kind == TileKind::Free).expect("free tile");
         assert_eq!((free.depth, free.size), (1, 6400));
-        let used = tiles.iter().find(|t| t.kind == TileKind::Folder && t.depth == 1 && tree.get(t.id).name == "a").unwrap();
+        let used = tiles.iter().find(|t| t.kind == TileKind::Folder && t.depth == 1 && tree.name(t.id) == "a").unwrap();
         assert!(free.rect.area() > used.rect.area(), "6400 free bytes outweigh the 6000 in a");
 
         // Without headers the children start right under the parent edge.
