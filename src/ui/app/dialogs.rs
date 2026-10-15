@@ -130,6 +130,10 @@ impl App {
                 }
             }
 
+            section(ui, &tr("Updates"));
+            ui.checkbox(&mut self.settings.check_updates, tr("Check for a newer version when Strata starts"));
+            ui.label(RichText::new(tr("Asks GitHub for the latest release at most once a day (GitHub sees your IP address, as for any web request). No information about your files is sent, and nothing is downloaded or installed.")).weak());
+
             section(ui, &tr("Excluded folders"));
             ui.label(RichText::new(tr("These folders are left out of the results. Restore one to see it again after the next scan.")).weak());
             let mut restore = None;

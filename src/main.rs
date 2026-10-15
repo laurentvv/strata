@@ -12,6 +12,7 @@ mod i18n_fr;
 mod scan;
 mod settings;
 mod spec;
+mod update;
 mod shell_ext;
 mod shell;
 mod trash;
@@ -52,6 +53,7 @@ Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
                                             headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders;
                                             --fast reads the NTFS Master File Table of a whole drive (administrator only)
        strata --version
+       strata --check-update [OWNER/NAME]   ask GitHub once whether a newer release exists (a repository other than Strata's is for tests)
        strata --screenshot FILE.png [--view tree|treemap|chart|types|largest|oldest|duplicates|compare|cleanup|age|system] [--tab N] [--dialog options|about]
                       [--lang CODE] [PATH]  developer flag: scan PATH, render one frame, save a PNG, exit
        strata --simulate-start-failure      developer flag: show the message of a window that cannot be created
@@ -66,6 +68,18 @@ fn main() {
     if args.iter().any(|a| a == "-V" || a == "--version") {
         attach_parent_console();
         println!("strata {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--check-update") {
+        attach_parent_console();
+        let repo = args.get(pos + 1).filter(|a| !a.starts_with('-')).map_or(update::REPO, String::as_str);
+        match update::latest(repo, env!("CARGO_PKG_VERSION")) {
+            Ok(outcome) => println!("{}", update::describe(&outcome, env!("CARGO_PKG_VERSION"))),
+            Err(e) => {
+                eprintln!("update check failed: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     let cli_mode = args.iter().any(|a| a == "--cli");

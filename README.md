@@ -43,6 +43,9 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   is drawn with DirectX 12 instead, on the CPU if there is no graphics card.
 - **Command line** for scripts and scheduled tasks: `strata --cli PATH --export report.csv|json|html --changes --cleanup`;
   `--fast` reads the NTFS Master File Table of a whole drive (administrator only).
+- **Optional update check**, off by default (Options > Updates, or `strata --check-update`): at most one request a
+  day to GitHub's public API, which sees your IP address and nothing about your files. It only tells you that a
+  newer release exists and opens its page; Strata never downloads or installs anything by itself.
 - English and French interface; light and dark theme.
 
 | | |

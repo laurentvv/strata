@@ -4,6 +4,7 @@ mod dialogs;
 mod recycle;
 mod ribbon;
 mod system;
+mod updates;
 #[cfg(test)]
 mod ui_tests;
 
@@ -400,6 +401,8 @@ pub struct App {
     confirm: Option<deletion::DeleteRequest>,
     /// Size of the Recycle Bin, the offer to empty it and its confirmation.
     bin: recycle::Bin,
+    /// The optional check for a newer release and its banner.
+    updates: updates::Updates,
     delete_job: Option<deletion::DeleteJob>,
     /// "Delete permanently" ticked in the confirmation window.
     delete_permanently: bool,
@@ -742,6 +745,7 @@ impl App {
             props: None,
             confirm: None,
             bin: recycle::Bin::default(),
+            updates: updates::Updates::default(),
             delete_job: None,
             delete_permanently: false,
             cleanup_checked: HashSet::new(),
@@ -3039,6 +3043,8 @@ impl App {
         self.poll_scan();
         self.poll_delete(&ctx);
         self.poll_bin(&ctx);
+        self.maybe_check_for_update();
+        self.poll_update(&ctx);
         self.poll_sub_scan();
         self.poll_duplicates();
         if self.handle.is_some() || self.dup_run.is_some() {
@@ -3082,6 +3088,7 @@ impl App {
             }
         }
         egui::CentralPanel::default().show(ui, |ui| {
+            self.update_banner(ui);
             self.admin_banner(ui);
             self.bin_banner(ui);
             self.central(ui);

@@ -145,6 +145,12 @@ pub struct Settings {
     /// Tell the user, on the start page and after a scan, what may be missing when Strata does not run
     /// as administrator.
     pub warn_not_admin: bool,
+    /// Ask GitHub, once a day at start-up, whether a newer release exists (off unless the user turns it on).
+    pub check_updates: bool,
+    /// When that was last done (Unix seconds, 0 = never).
+    pub last_update_check: i64,
+    /// A release the user chose not to be told about again.
+    pub skip_update_version: String,
     /// Proportional map docked under the tree.
     pub show_map: bool,
     /// Height of the docked map panel in points (0 = automatic).
@@ -188,6 +194,9 @@ impl Default for Settings {
             hide_empty: false,
             always_admin: false,
             warn_not_admin: true,
+            check_updates: false,
+            last_update_check: 0,
+            skip_update_version: String::new(),
             show_map: true,
             map_height: 0.0,
             map_right: false,
@@ -278,6 +287,14 @@ mod tests {
     }
 
     #[test]
+    fn the_update_check_is_off_by_default_and_never_happened() {
+        let s = Settings::default();
+        assert!(!s.check_updates, "no network request unless the user turns it on");
+        assert_eq!(s.last_update_check, 0);
+        assert!(s.skip_update_version.is_empty());
+    }
+
+    #[test]
     fn roundtrip() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("sub/settings.json");
@@ -297,6 +314,9 @@ mod tests {
             hide_empty: true,
             always_admin: true,
             warn_not_admin: false,
+            check_updates: true,
+            last_update_check: 1_700_000_000,
+            skip_update_version: "0.3.0".into(),
             show_map: false,
             map_height: 0.0,
             map_right: true,
