@@ -81,6 +81,11 @@ const RULES: &[Rule] = &[
     rule(&[".venv"], "Python virtual environment", Check, Marker::Inside(&["pyvenv.cfg"])),
     rule(&["env"], "Python virtual environment", Check, Marker::Inside(&["pyvenv.cfg"])),
     rule(&[".terraform"], "Terraform providers cache", Check, Marker::Sibling(&["*.tf"])),
+    rule(&[".zig-cache"], "Zig build cache", Safe, Marker::Sibling(&["build.zig"])),
+    rule(&["zig-out"], "Zig build output", Safe, Marker::Sibling(&["build.zig"])),
+    rule(&["library"], "Unity Library cache", Safe, Marker::Sibling(&["projectsettings"])),
+    rule(&["intermediate"], "Unreal Engine intermediate", Safe, Marker::Sibling(&["*.uproject"])),
+    rule(&["deriveddatacache"], "Unreal Engine cache", Safe, Marker::Sibling(&["*.uproject"])),
     // Windows leftovers.
     rule(&["$recycle.bin"], "Recycle Bin", Check, Marker::None),
     rule(&["windows.old"], "Previous Windows installation", Check, Marker::None),
@@ -95,10 +100,15 @@ const RULES: &[Rule] = &[
     rule(&["windows", "minidump"], "Crash dumps", Safe, Marker::None),
     rule(&["appdata", "local", "microsoft", "windows", "inetcache"], "Internet cache", Safe, Marker::None),
     rule(&["appdata", "local", "pip", "cache"], "pip cache", Safe, Marker::None),
+    rule(&["appdata", "local", "uv", "cache"], "uv cache", Safe, Marker::None),
+    rule(&["appdata", "local", "pnpm", "store"], "pnpm store cache", Safe, Marker::None),
+    rule(&["appdata", "local", "pnpm-cache"], "pnpm cache", Safe, Marker::None),
     rule(&["appdata", "local", "nuget", "v3-cache"], "NuGet cache", Safe, Marker::None),
     rule(&["appdata", "local", "yarn", "cache"], "Yarn cache", Safe, Marker::None),
+    rule(&["appdata", "local", "docker", "wsl"], "Docker WSL data", Check, Marker::None),
     rule(&[".npm", "_cacache"], "npm cache", Safe, Marker::None),
     rule(&[".cargo", "registry"], "Cargo registry cache", Safe, Marker::None),
+    rule(&["go", "pkg", "mod", "cache"], "Go module cache", Safe, Marker::None),
     rule(&[".m2", "repository"], "Maven repository cache", Check, Marker::None),
     rule(&["google", "chrome", "user data", "*", "cache"], "Chrome cache", Safe, Marker::None),
     rule(&["google", "chrome", "user data", "*", "code cache"], "Chrome cache", Safe, Marker::None),
@@ -106,6 +116,10 @@ const RULES: &[Rule] = &[
     rule(&["microsoft", "edge", "user data", "*", "cache"], "Edge cache", Safe, Marker::None),
     rule(&["microsoft", "edge", "user data", "*", "code cache"], "Edge cache", Safe, Marker::None),
     rule(&["microsoft", "edge", "user data", "*", "gpucache"], "Edge cache", Safe, Marker::None),
+    rule(&["mozilla", "firefox", "profiles", "*", "cache2"], "Firefox cache", Safe, Marker::None),
+    rule(&["bravesoftware", "brave-browser", "user data", "*", "cache"], "Brave cache", Safe, Marker::None),
+    rule(&["bravesoftware", "brave-browser", "user data", "*", "code cache"], "Brave cache", Safe, Marker::None),
+    rule(&["bravesoftware", "brave-browser", "user data", "*", "gpucache"], "Brave cache", Safe, Marker::None),
 ];
 
 fn component_matches(want: &str, name: &str) -> bool {
@@ -249,13 +263,16 @@ pub struct OldFile {
 /// software are left out.
 pub fn large_old_files(tree: &Tree, now_secs: i64, min_size: u64, min_age_days: u64, limit: usize) -> Vec<OldFile> {
     let offered: std::collections::HashSet<NodeId> = reclaimable(tree).into_iter().map(|r| r.id).collect();
-    let mut out: Vec<OldFile> = tree
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, n)| !n.is_dir && !n.is_link && n.size >= min_size && n.modified > 0)
-        .map(|(i, n)| OldFile { id: i as NodeId, size: n.size, age_days: (now_secs - n.modified).max(0) as u64 / 86_400 })
-        .filter(|f| f.age_days >= min_age_days)
+    let mut out: Vec<OldFile> = super::types::files_below(tree, Tree::ROOT)
+        .into_iter()
+        .filter_map(|id| {
+            let n = tree.get(id);
+            if n.size < min_size || n.modified <= 0 {
+                return None;
+            }
+            let age_days = (now_secs - n.modified).max(0) as u64 / 86_400;
+            (age_days >= min_age_days).then_some(OldFile { id, size: n.size, age_days })
+        })
         .filter(|f| {
             let mut cur = tree.get(f.id).parent;
             while cur != crate::scan::NONE {
@@ -315,13 +332,11 @@ const AGE_BOUNDS: &[(&str, u64)] = &[
 ];
 
 /// Size and file count per last-modified age. Files with an unknown date (0) are counted as the
-/// oldest bucket.
+/// oldest bucket. Detached (deleted / excluded) subtrees are ignored.
 pub fn age_buckets(tree: &Tree, now_secs: i64) -> Vec<AgeBucket> {
     let mut out: Vec<AgeBucket> = AGE_BOUNDS.iter().map(|(l, _)| AgeBucket { label: l, files: 0, size: 0 }).collect();
-    for n in &tree.nodes {
-        if n.is_dir {
-            continue;
-        }
+    for id in super::types::files_below(tree, Tree::ROOT) {
+        let n = tree.get(id);
         let days = if n.modified <= 0 { u64::MAX } else { (now_secs - n.modified).max(0) as u64 / 86_400 };
         let i = AGE_BOUNDS.iter().position(|(_, max)| days <= *max).unwrap_or(AGE_BOUNDS.len() - 1);
         out[i].files += 1;
@@ -519,5 +534,57 @@ mod tests {
         assert_eq!((b[0].files, b[0].size), (1, 100));
         assert_eq!((b[5].files, b[5].size), (1, 50));
         assert_eq!(b.iter().map(|x| x.files).sum::<u64>(), 2);
+    }
+
+    #[test]
+    fn detached_subtrees_are_ignored_by_old_files_and_age_buckets() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        write(&r.join("keep/a.bin"), 2000);
+        write(&r.join("gone/b.bin"), 5000);
+        let mut tree = scan_simple(r).tree;
+        let now = 2_000_000_000i64;
+        for p in [vec!["keep", "a.bin"], vec!["gone", "b.bin"]] {
+            let id = tree.resolve_path(&p).unwrap();
+            tree.nodes[id as usize].modified = now - 500 * 86_400;
+        }
+        let gone = tree.resolve_path(&["gone"]).unwrap();
+        tree.remove_subtree(gone);
+        let old = large_old_files(&tree, now, 1000, 365, 10);
+        assert_eq!(old.len(), 1);
+        assert_eq!(tree.name(old[0].id), "a.bin");
+        let b = age_buckets(&tree, now);
+        assert_eq!(b.iter().map(|x| (x.files, x.size)).fold((0, 0), |a, x| (a.0 + x.0, a.1 + x.1)), (1, 2000));
+    }
+
+    #[test]
+    fn finds_modern_dev_and_browser_caches() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        write(&r.join("Users/me/AppData/Local/uv/cache/wheel.whl"), 3000);
+        write(&r.join("Users/me/AppData/Local/pnpm/store/v3/a.bin"), 2000);
+        write(&r.join("Users/me/go/pkg/mod/cache/m.zip"), 1500);
+        write(&r.join("Users/me/AppData/Local/Mozilla/Firefox/Profiles/abc.default/cache2/c.bin"), 800);
+        write(&r.join("Users/me/AppData/Local/Docker/wsl/data/ext4.vhdx"), 9000);
+        write(&r.join("dev/zapp/build.zig"), 10);
+        write(&r.join("dev/zapp/.zig-cache/o.bin"), 400);
+        write(&r.join("dev/game/ProjectSettings/ProjectVersion.txt"), 10);
+        write(&r.join("dev/game/Library/Artifacts/a.bin"), 5000);
+        write(&r.join("dev/ue/MyGame.uproject"), 10);
+        write(&r.join("dev/ue/Intermediate/Build/x.obj"), 6000);
+        let tree = scan_simple(r).tree;
+        let found: Vec<(&str, Risk)> = reclaimable(&tree).iter().map(|f| (f.kind, f.risk)).collect();
+        for expected in [
+            ("uv cache", Safe),
+            ("pnpm store cache", Safe),
+            ("Go module cache", Safe),
+            ("Firefox cache", Safe),
+            ("Docker WSL data", Check),
+            ("Zig build cache", Safe),
+            ("Unity Library cache", Safe),
+            ("Unreal Engine intermediate", Safe),
+        ] {
+            assert!(found.contains(&expected), "missing {expected:?} in {found:?}");
+        }
     }
 }

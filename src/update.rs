@@ -65,7 +65,11 @@ pub fn interpret(status: u16, body: &[u8], repo: &str, current: &str) -> Result<
         return Ok(Outcome::UpToDate);
     }
     // The page is opened in a browser: it must be a page of that repository on GitHub, whatever the answer says.
-    if !url.starts_with(&format!("https://github.com/{repo}/")) {
+    let expected = format!("{repo}/");
+    let valid_url = url
+        .strip_prefix("https://github.com/")
+        .is_some_and(|rest| rest.get(..expected.len()).is_some_and(|p| p.eq_ignore_ascii_case(&expected)));
+    if !valid_url {
         return Err("unexpected release address".into());
     }
     Ok(Outcome::Available(Release { version: tag.trim_start_matches(['v', 'V']).to_string(), url: url.to_string() }))
@@ -112,7 +116,7 @@ fn get(host: &str, path: &str) -> Result<(u16, Vec<u8>), String> {
     let agent = wide(&format!("Strata/{}", env!("CARGO_PKG_VERSION")));
     let (host_w, verb, object, headers) = (wide(host), wide("GET"), wide(path), wide("Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28"));
 
-    // SAFETY (the whole block): every pointer passed is either null where the API allows it or points to a
+    // SAFETY: every pointer passed is either null where the API allows it or points to a
     // NUL-terminated buffer or a local that outlives the call; every handle is checked before use and closed by `Handle`.
     unsafe {
         let mut session = Handle(WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, null(), null(), 0));
@@ -214,6 +218,8 @@ mod tests {
         for url in ["https://evil.example/laurentvv/strata/", "http://github.com/laurentvv/strata/releases", "https://github.com/someone/else/releases/tag/v0.2.0", "https://github.com/laurentvv/strata-fake/releases"] {
             assert_eq!(interpret(200, &answer("v0.2.0", url, ""), REPO, "0.1.0"), Err("unexpected release address".into()), "{url}");
         }
+        // GitHub repository names are case-insensitive.
+        assert!(interpret(200, &answer("v0.2.0", PAGE, ""), "LaurentVV/Strata", "0.1.0").is_ok());
     }
 
     #[test]

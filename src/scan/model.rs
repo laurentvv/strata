@@ -28,6 +28,9 @@ pub struct Node {
     pub is_link: bool,
     /// Live-scan snapshots only: the directory is still being read (its totals are still growing).
     pub scanning: bool,
+    /// Secondary directory entry of a hard-linked file (NTFS MFT fast scan): counted in its
+    /// folder's totals, excluded from deduplicated disk usage (`Tree::unique_alloc`).
+    pub is_hardlink_dup: bool,
     /// Range of this node's name inside `Tree::names` (use `Tree::name`).
     pub(crate) name_off: u32,
     pub(crate) name_len: u32,
@@ -51,6 +54,7 @@ impl Node {
             is_dir,
             is_link: false,
             scanning: false,
+            is_hardlink_dup: false,
             name_off: 0,
             name_len: 0,
             child_start: 0,
@@ -188,6 +192,35 @@ impl Tree {
     /// Individual file nodes can be listed (false for live snapshots).
     pub fn has_file_nodes(&self) -> bool {
         self.live.is_none()
+    }
+
+    /// Count and allocated bytes of secondary hard-link entries below `root` (populated by the
+    /// NTFS MFT fast scan; `(0, 0)` for the regular walker).
+    pub fn hardlink_dup_stats(&self, root: NodeId) -> (u64, u64) {
+        if self.nodes.is_empty() || (root as usize) >= self.nodes.len() {
+            return (0, 0);
+        }
+        let (mut count, mut alloc) = (0u64, 0u64);
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let n = self.get(id);
+            if n.is_dir {
+                stack.extend(self.children(id).iter().copied());
+            } else if n.is_hardlink_dup {
+                count += 1;
+                alloc += n.alloc;
+            }
+        }
+        (count, alloc)
+    }
+
+    /// Deduplicated allocated space on disk below `root` (secondary hard links subtracted).
+    pub fn unique_alloc(&self, root: NodeId) -> u64 {
+        if self.nodes.is_empty() || (root as usize) >= self.nodes.len() {
+            return 0;
+        }
+        let (_, dup_alloc) = self.hardlink_dup_stats(root);
+        self.get(root).alloc.saturating_sub(dup_alloc)
     }
 
     pub fn root(&self) -> Option<&Node> {

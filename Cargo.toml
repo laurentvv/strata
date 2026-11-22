@@ -29,3 +29,17 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 [dev-dependencies]
 tempfile = "3.27.0"
 egui_kittest = "0.36"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+redundant_clone = "warn"
+inefficient_to_string = "warn"
+manual_string_new = "warn"
+needless_pass_by_ref_mut = "warn"
+trivially_copy_pass_by_ref = "warn"

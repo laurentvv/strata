@@ -196,8 +196,10 @@ pub fn parse_record(buf: &mut [u8], record_size: usize, want_runs: bool) -> Opti
                 if nonres {
                     let start_vcn = u64_at(attr, 16)?;
                     if start_vcn == 0 {
-                        let compressed = u16_at(attr, 12)? & 1 != 0 && attr.len() >= 0x48;
-                        rec.alloc = Some(if compressed { u64_at(attr, 0x40)? } else { u64_at(attr, 0x28)? });
+                        // Both compressed (0x0001) and sparse (0x8000) non-resident attributes carry
+                        // their actual allocated size at offset 0x40.
+                        let has_comp_size = u16_at(attr, 12)? & 0x8001 != 0 && attr.len() >= 0x48;
+                        rec.alloc = Some(if has_comp_size { u64_at(attr, 0x40)? } else { u64_at(attr, 0x28)? });
                         rec.size = Some(u64_at(attr, 0x30)?);
                     }
                     if want_runs {
@@ -241,9 +243,15 @@ pub fn parse_boot(b: &[u8]) -> Option<Boot> {
     if bps == 0 || spc == 0 {
         return None;
     }
-    let bpc = bps * spc;
+    let bpc = bps.checked_mul(spc)?;
     let c = b[0x40] as i8;
-    let record_size = if c > 0 { c as u64 * bpc } else { 1u64 << (-(c as i32)) } as usize;
+    let record_size = if c > 0 {
+        (c as u64).checked_mul(bpc)?
+    } else if (-63..=-1).contains(&c) {
+        1u64 << (-c as u32)
+    } else {
+        return None;
+    } as usize;
     if record_size < SECTOR || !record_size.is_multiple_of(SECTOR) || record_size > 64 * 1024 {
         return None;
     }
@@ -339,6 +347,7 @@ pub fn build_tree(records: Vec<Option<Record>>, volume_root: &str) -> Tree {
                 modified: r.modified.unwrap_or(0),
                 attrs,
                 is_link,
+                is_hardlink_dup: !r.is_dir && k > 0,
                 ..Node::blank(nid, r.is_dir)
             };
             let id = tree.push_node(entry_name(r, k).map_or("", |n| n.as_str()), n);
@@ -492,15 +501,20 @@ fn scan_volume(letter: char, root: &Path, progress: &Progress, cancel: &AtomicBo
     }
     let cancelled = cancel.load(Ordering::Relaxed);
     let mut tree = build_tree(records, &root.to_string_lossy());
+    let root_norm = root.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
     for ex in excludes {
-        if let Ok(rel) = ex.strip_prefix(root) {
-            let mut cur = Some(Tree::ROOT);
-            for comp in rel.components() {
-                cur = cur.and_then(|c| tree.find_child(c, &comp.as_os_str().to_string_lossy()));
-            }
-            if let Some(id) = cur {
-                tree.remove_subtree(id);
-            }
+        let ex_norm = ex.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+        let Some(rest) = ex_norm.strip_prefix(&root_norm) else { continue };
+        let rest = rest.trim_start_matches(['\\', '/']);
+        if rest.is_empty() {
+            continue;
+        }
+        let mut cur = Some(Tree::ROOT);
+        for comp in rest.split(['\\', '/']).filter(|c| !c.is_empty()) {
+            cur = cur.and_then(|c| tree.children(c).iter().copied().find(|&k| tree.name(k).eq_ignore_ascii_case(comp)));
+        }
+        if let Some(id) = cur {
+            tree.remove_subtree(id);
         }
     }
     let errors: Vec<ScanError> = Vec::new();
@@ -670,8 +684,31 @@ mod tests {
         assert_eq!(boot, Boot { bytes_per_cluster: 4096, mft_lcn: 786_432, record_size: 1024 });
         b[0x40] = 1; // 1 cluster per record => 4096
         assert_eq!(parse_boot(&b).unwrap().record_size, 4096);
+        // Malformed negative shifts (0x80 = -128, 0xC0 = -64, 0x00 = 0) must return None without panicking.
+        for bad in [0x00u8, 0x80, 0xC0, 0xBF] {
+            b[0x40] = bad;
+            assert!(parse_boot(&b).is_none(), "0x{bad:02X}");
+        }
+        b[0x40] = 0xF6;
         b[3] = b'X';
         assert!(parse_boot(&b).is_none());
+    }
+
+    #[test]
+    fn sparse_nonresident_data_uses_compressed_size_field() {
+        let mut a = vec![0u8; 0x50];
+        a[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        a[4..8].copy_from_slice(&(0x50u32).to_le_bytes());
+        a[8] = 1; // non-resident
+        a[12..14].copy_from_slice(&0x8000u16.to_le_bytes()); // FLAG_SPARSE
+        a[0x20..0x22].copy_from_slice(&0x48u16.to_le_bytes());
+        a[0x28..0x30].copy_from_slice(&(1024 * 1024u64).to_le_bytes()); // AllocatedSize
+        a[0x30..0x38].copy_from_slice(&(1024 * 1024u64).to_le_bytes()); // DataSize
+        a[0x40..0x48].copy_from_slice(&4096u64.to_le_bytes()); // CompressedSize (actual on disk)
+        a[0x48..0x4C].copy_from_slice(&[0x11, 0x01, 0x10, 0]);
+        let mut raw = record(1, 0, vec![std_info(10, 0x200), file_name(5, "sparse.img", 1), a]);
+        let rec = parse_record(&mut raw, RS, false).unwrap();
+        assert_eq!((rec.size, rec.alloc), (Some(1024 * 1024), Some(4096)));
     }
 
     fn parsed(mut raw: Vec<u8>) -> Option<Record> {
@@ -727,6 +764,9 @@ mod tests {
         assert_eq!((t.get(a).files, t.get(a).size), (2, 16000));
         assert_eq!((t.get(b).files, t.get(b).size), (1, 8000));
         assert_eq!((t.root().unwrap().files, t.root().unwrap().size), (3, 24000));
+        // secondary hard links are flagged so deduplicated disk usage is exact
+        assert_eq!(t.hardlink_dup_stats(Tree::ROOT), (2, 16384));
+        assert_eq!(t.unique_alloc(Tree::ROOT), 8192);
     }
 
     #[test]

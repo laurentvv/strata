@@ -50,6 +50,9 @@ impl DirDelta {
 impl Snapshot {
     /// Capture every directory of a finished scan.
     pub fn from_tree(tree: &Tree, taken: i64) -> Snapshot {
+        if tree.nodes.is_empty() {
+            return Snapshot { version: 1, root: String::new(), taken, dirs: Vec::new() };
+        }
         let mut dirs = Vec::new();
         let mut stack: Vec<(NodeId, String)> = vec![(Tree::ROOT, String::new())];
         while let Some((id, rel)) = stack.pop() {
@@ -71,11 +74,8 @@ impl Snapshot {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
         let json = serde_json::to_vec(self).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| e.to_string())
+        write_atomic(path, &json).map_err(|e| e.to_string())
     }
 
     pub fn load(path: &Path) -> Result<Snapshot, String> {
@@ -176,6 +176,19 @@ pub fn history_points(dir: &Path, root: &str) -> Vec<HistoryPoint> {
     std::fs::read(index_file(dir, root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, data)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn append_point(dir: &Path, root: &str, p: HistoryPoint) {
     let mut v = history_points(dir, root);
     v.retain(|x| x.taken != p.taken);
@@ -184,7 +197,7 @@ fn append_point(dir: &Path, root: &str, p: HistoryPoint) {
     let excess = v.len().saturating_sub(500);
     v.drain(..excess);
     if let Ok(json) = serde_json::to_vec(&v) {
-        let _ = std::fs::write(index_file(dir, root), json);
+        let _ = write_atomic(&index_file(dir, root), &json);
     }
 }
 
@@ -300,5 +313,11 @@ mod tests {
         prune_history(d.path(), r"C:\Data", 2);
         assert_eq!(names(history_for(d.path(), r"C:\Data")), ["c__data__30.json", "c__data__40.json"]);
         assert_eq!(history_for(d.path(), r"D:\Other").len(), 1);
+    }
+
+    #[test]
+    fn empty_tree_produces_empty_snapshot() {
+        let s = Snapshot::from_tree(&Tree::default(), 42);
+        assert_eq!((s.version, s.taken, s.dirs.len()), (1, 42, 0));
     }
 }

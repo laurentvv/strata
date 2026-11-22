@@ -748,7 +748,7 @@ fn a_scan_never_starts_in_a_view_that_waits_for_the_scan_to_end() {
     let app = App::new(&ctx, Settings { view: ViewKind::Treemap, ..st.clone() }, &RunOptions::default());
     assert_eq!(app.view, ViewKind::Treemap);
     // Asked for on the command line, it is honoured.
-    let app = App::new(&ctx, st.clone(), &RunOptions { view: Some(ViewKind::Cleanup), ..RunOptions::default() });
+    let app = App::new(&ctx, st, &RunOptions { view: Some(ViewKind::Cleanup), ..RunOptions::default() });
     assert_eq!(app.view, ViewKind::Cleanup);
     // Starting a scan from such a view switches to the tree; the others stay put.
     for (from, to) in [(ViewKind::Cleanup, ViewKind::Tree), (ViewKind::System, ViewKind::Tree), (ViewKind::Age, ViewKind::Tree), (ViewKind::Duplicates, ViewKind::Tree), (ViewKind::Chart, ViewKind::Chart)] {
@@ -852,4 +852,36 @@ fn the_update_texts_are_translated() {
     ] {
         assert!(crate::i18n::is_translated("fr", t), "no French for: {t}");
     }
+}
+
+#[test]
+fn a_cleanup_item_can_be_ignored_and_shown_again() {
+    let _g = lock();
+    let dir = tempfile::tempdir().unwrap();
+    let r = dir.path();
+    let put = |p: &str, n: usize| {
+        let f = r.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, vec![1u8; n]).unwrap();
+    };
+    put("crate/Cargo.toml", 10);
+    put("crate/target/debug/a.bin", 8000);
+    let mut h = harness(r);
+    h.state_mut().view = ViewKind::Cleanup;
+    h.run_steps(4);
+    assert!(h.query_by_label("Rust build output").is_some());
+
+    let p = center_of(&h, "Rust build output");
+    click_at(&mut h, p, PointerButton::Secondary);
+    let ignore_pos = menu_item_pos(&h, "Ignore in Clean-up");
+    click_at(&mut h, ignore_pos, PointerButton::Primary);
+    h.run_steps(4);
+    assert!(h.query_by_label("Rust build output").is_none(), "ignored folder disappears from Clean-up");
+    assert_eq!(h.state().settings.cleanup_ignored.len(), 1);
+
+    let reset_pos = h.get_by_label_contains("Show ignored again").rect().center();
+    click_at(&mut h, reset_pos, PointerButton::Primary);
+    h.run_steps(4);
+    assert!(h.state().settings.cleanup_ignored.is_empty());
+    assert!(h.query_by_label("Rust build output").is_some(), "restored folder shows up again");
 }

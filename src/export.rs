@@ -125,16 +125,57 @@ fn esc(s: &str) -> String {
 }
 
 const CSS: &str = "body{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#222}\
-h1{font-size:20px}table{border-collapse:collapse;width:100%}\
+h1{font-size:20px}h2{font-size:15px;margin-top:24px}table{border-collapse:collapse;width:100%}\
 th,td{padding:4px 8px;border-bottom:1px solid #ddd;text-align:right;font-size:13px}\
 th{background:#f0f0f0;position:sticky;top:0}td.n,th.n{text-align:left}\
 .bar{display:inline-block;height:10px;background:#78be78;vertical-align:middle}\
-.box{display:inline-block;width:110px;background:#eee;margin-right:6px}";
+.box{display:inline-block;width:110px;background:#eee;margin-right:6px}\
+.tree details{margin-left:16px}.tree>details{margin-left:0}\
+.tree summary,.tree .leaf{cursor:pointer;padding:3px 4px;font-size:13px;border-bottom:1px solid #f0f0f0;display:flex;gap:10px;align-items:center}\
+.tree .leaf{cursor:default;margin-left:16px}.tree summary:hover{background:#f7f7f7}\
+.tree .fn{flex:1;font-weight:500}.tree .fm{color:#555;font-variant-numeric:tabular-nums}";
 
-/// Self-contained HTML report with the folder table (no external resources).
+fn write_html_details<W: Write>(tree: &Tree, id: NodeId, root: NodeId, depth: usize, max_depth: usize, w: &mut W) -> io::Result<()> {
+    let n = tree.get(id);
+    let pct = if n.parent == crate::scan::NONE || id == root {
+        100.0
+    } else {
+        let ps = tree.get(n.parent).size;
+        if ps > 0 { n.size as f64 * 100.0 / ps as f64 } else { 0.0 }
+    };
+    let mut subdirs: Vec<NodeId> = if depth < max_depth {
+        tree.children(id).iter().copied().filter(|&c| tree.get(c).is_dir).collect()
+    } else {
+        Vec::new()
+    };
+    subdirs.sort_by(|&a, &b| tree.get(b).size.cmp(&tree.get(a).size).then(a.cmp(&b)));
+    let meta = format!(
+        "<span class=\"box\"><span class=\"bar\" style=\"width:{:.0}%\"></span></span><span class=\"fm\">{:.1}% &middot; {} &middot; {} files</span>",
+        pct.clamp(0.0, 100.0),
+        pct,
+        format_bytes(n.size),
+        n.files
+    );
+    if subdirs.is_empty() {
+        writeln!(w, "<div class=\"leaf\"><span class=\"fn\">{}</span>{meta}</div>", esc(tree.name(id)))
+    } else {
+        let open = if depth == 0 { " open" } else { "" };
+        writeln!(w, "<details{open}><summary><span class=\"fn\">{}</span>{meta}</summary>", esc(tree.name(id)))?;
+        for c in subdirs {
+            write_html_details(tree, c, root, depth + 1, max_depth, w)?;
+        }
+        writeln!(w, "</details>")
+    }
+}
+
+/// Self-contained HTML report with an interactive collapsible tree (`<details>`) and folder table (no scripts or external resources).
 pub fn write_html<W: Write>(tree: &Tree, root: NodeId, max_depth: usize, mut w: W) -> io::Result<()> {
-    let r = tree.get(root);
     writeln!(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Disk usage report</title><style>{CSS}</style></head><body>")?;
+    if tree.nodes.is_empty() || (root as usize) >= tree.nodes.len() {
+        return writeln!(w, "</body></html>");
+    }
+    let r = tree.get(root);
+    let capped = max_depth.min(200);
     writeln!(w, "<h1>Disk usage: {}</h1>", esc(&tree.path_of(root).to_string_lossy()))?;
     writeln!(
         w,
@@ -145,8 +186,11 @@ pub fn write_html<W: Write>(tree: &Tree, root: NodeId, max_depth: usize, mut w: 
         r.dirs,
         esc(&chrono::Local::now().format("%Y-%m-%d %H:%M").to_string())
     )?;
+    writeln!(w, "<h2>Folder tree</h2><div class=\"tree\">")?;
+    write_html_details(tree, root, root, 0, capped, &mut w)?;
+    writeln!(w, "</div><h2>Folder table</h2>")?;
     writeln!(w, "<table><tr><th class=\"n\">Folder</th><th>Size</th><th>Allocated</th><th class=\"n\">% of parent</th><th>Files</th><th>Folders</th><th>Last modified</th></tr>")?;
-    for (id, depth) in walk_sorted(tree, root, max_depth, true) {
+    for (id, depth) in walk_sorted(tree, root, capped, true) {
         let n = tree.get(id);
         let pct = if n.parent == crate::scan::NONE || id == root {
             100.0
@@ -173,12 +217,13 @@ pub fn write_html<W: Write>(tree: &Tree, root: NodeId, max_depth: usize, mut w: 
 
 /// Write `fmt` to `path` (HTML/JSON limited to `max_depth` levels).
 pub fn export_to_file(tree: &Tree, root: NodeId, fmt: Format, max_depth: usize, path: &std::path::Path) -> io::Result<()> {
-    let f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     match fmt {
-        Format::Csv => write_csv(tree, root, f),
-        Format::Json => write_json(tree, root, max_depth, f),
-        Format::Html => write_html(tree, root, max_depth, f),
+        Format::Csv => write_csv(tree, root, &mut f)?,
+        Format::Json => write_json(tree, root, max_depth, &mut f)?,
+        Format::Html => write_html(tree, root, max_depth, &mut f)?,
     }
+    f.flush()
 }
 
 #[cfg(test)]
@@ -230,6 +275,7 @@ mod tests {
         // folder table lists directories only
         assert!(!s.contains("&lt;z&gt;.bin"));
         assert_eq!(s.matches("<tr><td").count(), 3); // root, a, b
+        assert!(s.contains("<details open><summary>"), "collapsible folder tree uses native HTML5 details");
         assert!(s.contains("100.0%"));
     }
 
@@ -242,5 +288,15 @@ mod tests {
             export_to_file(&t, 0, fmt, 10, &p).unwrap();
             assert!(std::fs::metadata(&p).unwrap().len() > 50);
         }
+    }
+
+    #[test]
+    fn empty_tree_exports_without_panicking() {
+        let empty = Tree::default();
+        let (mut csv, mut json, mut html) = (Vec::new(), Vec::new(), Vec::new());
+        write_csv(&empty, 0, &mut csv).unwrap();
+        write_json(&empty, 0, 5, &mut json).unwrap();
+        write_html(&empty, 0, 5, &mut html).unwrap();
+        assert!(String::from_utf8(html).unwrap().contains("</html>"));
     }
 }

@@ -174,6 +174,8 @@ pub struct Settings {
     pub col_widths: Vec<(SortKey, f32)>,
     /// Most recently scanned roots, newest first.
     pub recent: Vec<String>,
+    /// Folder / file paths the user asked Clean-up never to offer again (normalised case-insensitively on Windows).
+    pub cleanup_ignored: Vec<String>,
 }
 
 impl Default for Settings {
@@ -212,6 +214,7 @@ impl Default for Settings {
             window: None,
             col_widths: Vec::new(),
             recent: Vec::new(),
+            cleanup_ignored: Vec::new(),
         }
     }
 }
@@ -266,10 +269,15 @@ pub fn save_to(path: &Path, s: &Settings) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let json = serde_json::to_string_pretty(s).map_err(std::io::Error::other)?;
-    // Write then rename so a crash never leaves a truncated file.
-    let tmp = path.with_extension("json.tmp");
+    // Write then rename so a crash never leaves a truncated file; include the PID so concurrent
+    // instances do not race on the same temporary file.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -332,6 +340,7 @@ mod tests {
             window: Some(WindowGeom { w: 900.0, h: 600.0, x: Some(10.0), y: None }),
             recent: vec![r"C:\Data".into(), r"D:\x".into()],
             col_widths: vec![(SortKey::Name, 321.0), (SortKey::Size, 77.5)],
+            cleanup_ignored: vec![r"C:\Data\keep_target".into()],
         };
         save_to(&p, &s).unwrap();
         assert_eq!(load_from(&p), s);

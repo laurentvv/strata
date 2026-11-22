@@ -19,11 +19,13 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   any earlier scan, with a size-over-time chart.
 - **Clean-up**: reclaimable folders, each marked *Safe* (regenerated automatically) or *Check first*:
   build output and dependency folders of your projects (`node_modules` with a lock file, Cargo `target`,
-  .NET `bin`/`obj`, `__pycache__`, ...), browser caches, `AppData\Local\Temp`, crash dumps, package-manager
-  caches, `Windows.old`; plus empty folders, duplicate files (keep one copy; hard links are not copies) and
-  size by file age and big files not modified for over a year (always "Check first"). Dependency folders of
-  installed programs and globally installed tools are never offered. For what Strata does not delete itself
-  (Windows Update files, system logs) there are buttons for Windows Disk Cleanup and the storage settings.
+  .NET `bin`/`obj`, `__pycache__`, Zig, Unity `Library`, Unreal `Intermediate`, ...), browser caches (Chrome, Edge,
+  Firefox, Brave), `AppData\Local\Temp`, crash dumps, package-manager caches (pip, uv, npm, pnpm, Yarn, Cargo, Go,
+  NuGet, Maven), `Windows.old`, Docker WSL data; plus empty folders, duplicate files (keep one copy; hard links are
+  not copies) and size by file age and big files not modified for over a year (always "Check first"). Right-click any
+  row to ignore it in Clean-up permanently (reversible). Dependency folders of installed programs and globally
+  installed tools are never offered. For what Strata does not delete itself (Windows Update files, system logs) there
+  are buttons for Windows Disk Cleanup and the storage settings.
 - **Safe by default**: deletions go to the Recycle Bin after a confirmation; a banner then says the space is only
   freed once it is emptied and offers to empty it (after asking: it empties the whole bin, and shows its size).
   "Delete permanently" is an unticked option of the confirmation; drive roots, the Windows and program folders and
@@ -41,8 +43,10 @@ live tree and a proportional map, find what can be cleaned, and keep a history t
   administrator (or always, in Options); the reminder can be turned off.
 - **Opens without OpenGL**: when a machine has no usable OpenGL (some virtual machines, remote sessions), the window
   is drawn with DirectX 12 instead, on the CPU if there is no graphics card.
-- **Command line** for scripts and scheduled tasks: `strata --cli PATH --export report.csv|json|html --changes --cleanup`;
-  `--fast` reads the NTFS Master File Table of a whole drive (administrator only).
+- **Command line** for scripts and scheduled tasks: `strata --cli PATH --export report.csv|json|html --changes --cleanup --json --fail-over SIZE`;
+  HTML reports include a collapsible folder tree without scripts, `--json` emits a machine-readable report,
+  `--fail-over SIZE` exits with code 3 when the scanned size exceeds `SIZE`, and `--fast` reads the NTFS Master File
+  Table of a whole drive (administrator only, also reporting deduplicated disk usage across hard links).
 - **Optional update check**, off by default (Options > Updates, or `strata --check-update`): at most one request a
   day to GitHub's public API, which sees your IP address and nothing about your files. It only tells you that a
   newer release exists and opens its page; Strata never downloads or installs anything by itself.

@@ -20,10 +20,15 @@ pub enum MenuAct {
     Properties,
     Delete,
     Reveal,
+    IgnoreCleanup,
 }
 
 /// Right-click menu shared by the ranked lists and the clean-up list.
 pub fn row_menu(resp: &egui::Response, id: NodeId) -> Option<ListEvent> {
+    row_menu_opts(resp, id, false)
+}
+
+fn row_menu_opts(resp: &egui::Response, id: NodeId, allow_ignore: bool) -> Option<ListEvent> {
     let mut out = None;
     resp.context_menu(|ui| {
         for (label, act) in [
@@ -36,6 +41,13 @@ pub fn row_menu(resp: &egui::Response, id: NodeId) -> Option<ListEvent> {
         ] {
             if ui.button(tr(label)).clicked() {
                 out = Some(ListEvent::Menu(id, act));
+                ui.close();
+            }
+        }
+        if allow_ignore {
+            ui.separator();
+            if ui.button(tr("Ignore in Clean-up")).clicked() {
+                out = Some(ListEvent::Menu(id, MenuAct::IgnoreCleanup));
                 ui.close();
             }
         }
@@ -133,7 +145,7 @@ pub fn breadcrumb(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId) {
 use super::theme::MAP_LEVELS as LEVELS;
 
 /// Appearance of the proportional map (the map options dialog).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapStyle {
     /// Folder levels drawn below the shown folder (the legend shows one more entry).
     pub levels: u8,
@@ -150,6 +162,62 @@ pub struct MapStyle {
 impl Default for MapStyle {
     fn default() -> Self {
         MapStyle { levels: 4, unique_files: false, headers: true, legend: true, labels: true, free_space: None, by_type: true }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreemapKey {
+    tree_gen: u64,
+    root: NodeId,
+    w_bits: u32,
+    h_bits: u32,
+    style: MapStyle,
+    has_file_nodes: bool,
+}
+
+/// Memoised treemap layout so hovering / pointer motion never recomputes the squarification at 60 FPS.
+#[derive(Debug, Default)]
+pub struct TreemapCache {
+    key: Option<TreemapKey>,
+    tiles: Vec<super::treemap::Tile>,
+    #[cfg(test)]
+    builds: usize,
+}
+
+impl TreemapCache {
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.tiles.clear();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tiles_for(
+        &mut self,
+        tree: &Tree,
+        tree_gen: u64,
+        root: NodeId,
+        w: f32,
+        h: f32,
+        style: &MapStyle,
+        opts: &super::treemap::NestOpts,
+    ) -> &[super::treemap::Tile] {
+        let key = TreemapKey {
+            tree_gen,
+            root,
+            w_bits: w.to_bits(),
+            h_bits: h.to_bits(),
+            style: *style,
+            has_file_nodes: tree.has_file_nodes(),
+        };
+        if self.key.as_ref() != Some(&key) {
+            self.tiles = super::treemap::nested_with(tree, root, TRect::new(0.0, 0.0, w, h), opts);
+            self.key = Some(key);
+            #[cfg(test)]
+            {
+                self.builds += 1;
+            }
+        }
+        &self.tiles
     }
 }
 
@@ -180,8 +248,18 @@ fn mix_summary(mix: &Mix) -> String {
     order.iter().take(3).map(|&i| format!("{} {}%", tr(Category::ALL[i].label()), (mix[i] as f32 / 10.0).round())).collect::<Vec<_>>().join(" - ")
 }
 
-pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected: &mut Option<NodeId>, docked: bool, style: &MapStyle) -> Option<ListEvent> {
-    use super::treemap::{nested_with, tile_at, NestOpts, TileKind, HEADER_H};
+#[allow(clippy::too_many_arguments)]
+pub fn treemap_view(
+    ui: &mut egui::Ui,
+    tree: &Tree,
+    tree_gen: u64,
+    cache: &mut TreemapCache,
+    root: &mut NodeId,
+    selected: &mut Option<NodeId>,
+    docked: bool,
+    style: &MapStyle,
+) -> Option<ListEvent> {
+    use super::treemap::{tile_at, NestOpts, TileKind, HEADER_H};
     if !docked {
         breadcrumb(ui, tree, root);
     }
@@ -193,12 +271,12 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
     // A live snapshot has no file nodes: files keep the plain tone (and the level legend) until the scan ends.
     let by_type = style.by_type && tree.has_file_nodes();
     let opts = NestOpts { max_depth: style.levels, unique_files: style.unique_files, headers: style.headers, max_tiles: MAX_TILES, free_space: style.free_space, by_type };
-    let tiles = nested_with(tree, *root, TRect::new(0.0, 0.0, area.width(), area.height()), &opts);
+    let tiles = cache.tiles_for(tree, tree_gen, *root, area.width(), area.height(), style, &opts);
     if tiles.is_empty() {
         painter.text(area.center(), egui::Align2::CENTER_CENTER, tr("Nothing to show"), egui::FontId::proportional(14.0), ui.visuals().text_color());
     }
     let menu_key = egui::Id::new("treemap_menu_node");
-    let hit = resp.hover_pos().and_then(|p| tile_at(&tiles, p.x - area.min.x, p.y - area.min.y));
+    let hit = resp.hover_pos().and_then(|p| tile_at(tiles, p.x - area.min.x, p.y - area.min.y));
     let to_rect = |r: TRect| egui::Rect::from_min_size(area.min + egui::vec2(r.x, r.y), egui::vec2(r.w, r.h));
     let font = egui::FontId::proportional(11.0);
     for (i, t) in tiles.iter().enumerate() {
@@ -254,7 +332,7 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
     }
     let mut event = None;
     if let Some(node) = ui.memory(|m| m.data.get_temp::<NodeId>(menu_key)) {
-        if (node as usize) < tree.nodes.len() {
+        if (node as usize) < tree.nodes.len() && (node == Tree::ROOT || tree.get(node).parent != NONE) {
             event = row_menu(&resp, node);
         }
     }
@@ -267,7 +345,7 @@ pub fn treemap_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId, selected:
             _ => tree.path_of(t.id).display().to_string(),
         };
         let total = if style.free_space.is_some() { tree.get(*root).size + style.free_space.unwrap_or(0) } else { tree.get(*root).size }.max(1);
-        let mut tip = format!("{}\n{} ({:.1}% {} {})", what, format_bytes(t.size), t.size as f64 * 100.0 / total as f64, tr("of"), tree.name(*root));
+        let mut tip = format!("{}\n{} ({} {} {})", what, format_bytes(t.size), crate::fmt::percent(t.size as f64 / total as f64), tr("of"), tree.name(*root));
         let detail = match t.kind {
             TileKind::Folder => Some(format!("{} {} - {} {}", crate::fmt::group_int(n.files), tr("Files"), crate::fmt::group_int(n.dirs), tr("Folders"))),
             TileKind::File => {
@@ -363,7 +441,7 @@ pub fn chart_view(ui: &mut egui::Ui, tree: &Tree, root: &mut NodeId) {
         let mut fill = row;
         fill.set_width(row.width() * s.size as f32 / max as f32);
         painter.rect_filled(fill, 1.0, palette(i));
-        let label = format!("{}  -  {} ({:.1}%)", s.name, format_bytes(s.size), s.size as f64 * 100.0 / total as f64);
+        let label = format!("{}  -  {} ({})", s.name, format_bytes(s.size), crate::fmt::percent(s.size as f64 / total as f64));
         painter.with_clip_rect(row).text(
             row.min + egui::vec2(4.0, 3.0),
             egui::Align2::LEFT_TOP,
@@ -421,7 +499,7 @@ pub fn types_view(ui: &mut egui::Ui, stats: &[TypeStat]) -> Option<String> {
                     ui.label(tr(s.category.label()));
                 });
                 row.col(|ui| {
-                    ui.label(s.count.to_string());
+                    ui.label(crate::fmt::group_int(s.count));
                 });
                 row.col(|ui| {
                     ui.label(format_bytes(s.size));
@@ -439,7 +517,7 @@ pub fn types_view(ui: &mut egui::Ui, stats: &[TypeStat]) -> Option<String> {
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        format!("{:.1}%", s.percent),
+                        crate::fmt::percent(s.percent / 100.0),
                         egui::FontId::proportional(11.0),
                         ui.visuals().text_color(),
                     );
@@ -578,7 +656,8 @@ pub fn compare_view(ui: &mut egui::Ui, cmp: Option<(&str, i64, &[crate::analysis
                     ui.label(RichText::new(tr(kind)).color(col));
                 });
                 row.col(|ui| {
-                    let p = if c.path.is_empty() { root.to_string() } else { c.path.replace('/', "\\") };
+                    let sep = std::path::MAIN_SEPARATOR_STR;
+                    let p = if c.path.is_empty() { root.to_string() } else { c.path.replace('/', sep) };
                     ui.add(egui::Label::new(p).truncate());
                 });
                 row.col(|ui| {
@@ -591,8 +670,11 @@ pub fn compare_view(ui: &mut egui::Ui, cmp: Option<(&str, i64, &[crate::analysis
                     ui.label(RichText::new(signed_bytes(c.delta())).color(col));
                 });
                 if row.response().double_clicked() && c.kind != ChangeKind::Removed {
-                    let rel = c.path.replace('/', "\\");
-                    open = Some(if rel.is_empty() { root.to_string() } else { format!("{}\\{}", root.trim_end_matches('\\'), rel) });
+                    open = Some(if c.path.is_empty() {
+                        root.to_string()
+                    } else {
+                        std::path::Path::new(root).join(&c.path).to_string_lossy().into_owned()
+                    });
                 }
             });
         });
@@ -668,7 +750,7 @@ pub fn cleanup_list(ui: &mut egui::Ui, rows: &[CleanRow], selected: Option<NodeI
                         ui.label(format_bytes(r.size));
                     });
                     let resp = row.response();
-                    if let Some(m) = row_menu(&resp, r.id) {
+                    if let Some(m) = row_menu_opts(&resp, r.id, true) {
                         ev = Some(m);
                     }
                     if resp.double_clicked() {
@@ -699,7 +781,7 @@ pub fn age_view(ui: &mut egui::Ui, buckets: &[crate::analysis::insights::AgeBuck
             fill.set_width(rect.width() * b.size as f32 / max as f32);
             ui.painter().rect_filled(fill, 0.0, bar_col);
             ui.add_sized([90.0, 22.0], egui::Label::new(format_bytes(b.size)));
-            ui.add_sized([60.0, 22.0], egui::Label::new(format!("{:.1} %", b.size as f64 * 100.0 / total as f64)));
+            ui.add_sized([60.0, 22.0], egui::Label::new(crate::fmt::percent(b.size as f64 / total as f64)));
             ui.label(format!("{} {}", crate::fmt::group_int(b.files), tr("Files")));
         });
     }
@@ -731,5 +813,30 @@ fn size_history_chart(ui: &mut egui::Ui, points: &[crate::analysis::snapshot::Hi
     }
     if let Some(p) = tip {
         resp.on_hover_text_at_pointer(format!("{}\n{} - {} {}", format_time(p.taken), format_bytes(p.size), crate::fmt::group_int(p.files), tr("Files")));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::types::testutil::tree_of;
+
+    #[test]
+    fn treemap_cache_reuses_layout_until_inputs_change() {
+        let tree = tree_of(&[("a/x.bin", 1000, 0), ("b/y.bin", 2000, 0)]);
+        let mut cache = TreemapCache::default();
+        let style = MapStyle::default();
+        let opts = super::super::treemap::NestOpts { max_depth: style.levels, unique_files: style.unique_files, headers: style.headers, max_tiles: MAX_TILES, free_space: style.free_space, by_type: style.by_type };
+        let n1 = cache.tiles_for(&tree, 1, Tree::ROOT, 600.0, 400.0, &style, &opts).len();
+        let n2 = cache.tiles_for(&tree, 1, Tree::ROOT, 600.0, 400.0, &style, &opts).len();
+        assert_eq!((n1, n2, cache.builds), (n1, n1, 1), "same key hits the cache");
+        // Changing tree generation, size or style triggers a rebuild.
+        cache.tiles_for(&tree, 2, Tree::ROOT, 600.0, 400.0, &style, &opts);
+        assert_eq!(cache.builds, 2);
+        cache.tiles_for(&tree, 2, Tree::ROOT, 640.0, 400.0, &style, &opts);
+        assert_eq!(cache.builds, 3);
+        let style2 = MapStyle { by_type: false, ..style };
+        cache.tiles_for(&tree, 2, Tree::ROOT, 640.0, 400.0, &style2, &opts);
+        assert_eq!(cache.builds, 4);
     }
 }

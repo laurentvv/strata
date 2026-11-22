@@ -1,20 +1,55 @@
 //! Remove files and folders: to the Recycle Bin (Windows; other platforms report "unsupported") or
 //! permanently. Both refuse the folders a machine cannot do without.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+
+/// Lexically normalise a path (strip `\\?\`, collapse `.` and `..`) without following symlinks.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let stripped = crate::scan::model::strip_verbatim(&path.to_string_lossy());
+    let mut out = PathBuf::new();
+    for c in Path::new(&stripped).components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn norm_key(p: &Path) -> String {
+    let s = p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+    if cfg!(windows) { s.replace('/', "\\") } else { s }
+}
 
 /// Folders that must never be deleted by Strata, even on request: drive roots, the Windows and program
 /// folders and the user's profile folders themselves (their contents are another matter).
 pub fn is_protected(path: &Path) -> bool {
-    if path.parent().is_none() || path.components().count() <= 2 {
+    let clean = normalize_lexical(path);
+    if clean.parent().is_none() || clean.components().count() <= 2 {
         return true;
     }
-    let norm = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
-    let target = norm(path);
+    let target = norm_key(&clean);
     ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PUBLIC", "HOME"]
         .iter()
         .filter_map(std::env::var_os)
-        .any(|v| norm(Path::new(&v)) == target)
+        .any(|v| norm_key(&normalize_lexical(Path::new(&v))) == target)
+}
+
+#[cfg(windows)]
+fn is_dir_link(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let attrs = meta.file_attributes();
+    (attrs & FILE_ATTRIBUTE_DIRECTORY != 0) && (attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+#[cfg(not(windows))]
+fn is_dir_link(_meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 /// Delete a file or a folder with everything in it, without the Recycle Bin. Links are removed
@@ -24,7 +59,13 @@ pub fn delete_permanently(path: &Path) -> Result<(), String> {
         return Err("protected folder".into());
     }
     let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    let res = if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
+    let res = if is_dir_link(&meta) {
+        std::fs::remove_dir(path)
+    } else if meta.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
     res.map_err(|e| e.to_string())
 }
 
@@ -33,10 +74,17 @@ pub fn recycle(path: &std::path::Path) -> Result<(), String> {
     if is_protected(path) {
         return Err("protected folder".into());
     }
+    use std::borrow::Cow;
+    use std::ffi::{OsStr, OsString};
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
+    // SHFileOperationW rejects `\\?\` verbatim prefixes and `/` separators; normalise first.
+    let os: Cow<'_, OsStr> = match path.to_str() {
+        Some(s) => Cow::Owned(OsString::from(crate::scan::model::strip_verbatim(s).replace('/', "\\"))),
+        None => Cow::Borrowed(path.as_os_str()),
+    };
     // The source list is double-NUL terminated.
-    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let mut from: Vec<u16> = os.encode_wide().collect();
     from.extend([0, 0]);
     // SAFETY: SHFILEOPSTRUCTW is plain data (zero is a valid empty value); `from` outlives the call.
     let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
@@ -155,5 +203,36 @@ mod permanent_tests {
         }
         let d = tempfile::tempdir().unwrap();
         assert!(!is_protected(&d.path().join("x")));
+        if cfg!(windows) {
+            if let Some(sr) = std::env::var_os("SystemRoot") {
+                let s = sr.to_string_lossy();
+                assert!(is_protected(Path::new(&s.replace('\\', "/"))), "forward slashes cannot bypass protection");
+                assert!(is_protected(Path::new(&format!(r"\\?\{s}"))), "verbatim prefix cannot bypass protection");
+                assert!(is_protected(&PathBuf::from(&*s).join("System32").join("..")), "parent traversal cannot bypass protection");
+            }
+            assert!(is_protected(Path::new(r"C:\foo\..")), "traversal back to root is protected");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn permanent_deletion_removes_a_junction_without_touching_its_target() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("target");
+        let link = d.path().join("junc");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"important").unwrap();
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !ok {
+            return;
+        }
+        delete_permanently(&link).unwrap();
+        assert!(!link.exists(), "junction itself is removed");
+        assert!(target.join("keep.txt").exists(), "target contents are untouched");
     }
 }
