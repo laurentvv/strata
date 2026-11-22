@@ -49,8 +49,9 @@ Usage: strata [PATH]                launch the GUI (PATH is scanned at startup)
        strata --renderer auto|opengl|directx|software [PATH]
                                             how the window is drawn: auto tries OpenGL, then DirectX (which also works in virtual machines
                                             without OpenGL); software forces the DirectX software adapter
-       strata --cli [PATH] [-d N] [--export FILE.csv|json|html] [--changes] [--cleanup] [--fast]
+       strata --cli [PATH] [-d N] [--export FILE.csv|json|html] [--changes] [--cleanup] [--json] [--fail-over SIZE] [--fast]
                                             headless scan: print the tree, export it, show what changed since the last scan, list reclaimable folders;
+                                            --json prints a machine-readable JSON report; --fail-over SIZE exits with code 3 when the scanned size exceeds SIZE;
                                             --fast reads the NTFS Master File Table of a whole drive (administrator only)
        strata --version
        strata --check-update [OWNER/NAME]   ask GitHub once whether a newer release exists (a repository other than Strata's is for tests)

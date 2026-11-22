@@ -61,7 +61,8 @@ pub fn group_int(n: u64) -> String {
 
 /// Fixed-decimals number with the locale's separators ("1 234,5" / "1,234.5").
 pub fn decimal_in(v: f64, decimals: usize, l: Loc) -> String {
-    let s = format!("{:.*}", decimals, v.max(0.0));
+    let clean = if v.is_finite() { v.max(0.0) } else { 0.0 };
+    let s = format!("{:.*}", decimals, clean);
     let (int, frac) = s.split_once('.').unwrap_or((s.as_str(), ""));
     let int = group_int_in(int.parse().unwrap_or(0), l);
     if frac.is_empty() {
@@ -174,12 +175,22 @@ pub fn short_date_to_chrono(pat: &str) -> String {
             }),
             'y' => out.push_str(if n <= 2 { "%y" } else { "%Y" }),
             '\'' => {
-                let mut j = i + 1;
-                while j < c.len() && c[j] != '\'' {
-                    out.push(c[j]);
-                    j += 1;
+                // `''` is an escaped literal apostrophe in Windows date patterns.
+                if c.get(i + 1) == Some(&'\'') {
+                    out.push('\'');
+                    n = 2;
+                } else {
+                    let mut j = i + 1;
+                    while j < c.len() && c[j] != '\'' {
+                        if c[j] == '%' {
+                            out.push_str("%%");
+                        } else {
+                            out.push(c[j]);
+                        }
+                        j += 1;
+                    }
+                    n = j + 1 - i;
                 }
-                n = j + 1 - i;
             }
             '%' => out.push_str("%%"),
             _ => out.extend(std::iter::repeat_n(ch, n)),
@@ -293,6 +304,9 @@ mod tests {
         assert_eq!(short_date_to_chrono("yyyy-MM-dd"), "%Y-%m-%d");
         assert_eq!(short_date_to_chrono("d. MMMM yyyy"), "%-d. %B %Y");
         assert_eq!(short_date_to_chrono("dd 'de' MMM"), "%d de %b");
+        assert_eq!(short_date_to_chrono("dd '%' '' MM"), "%d %% ' %m");
+        assert_eq!(decimal_in(f64::NAN, 1, Loc::En), "0.0");
+        assert_eq!(decimal_in(f64::INFINITY, 1, Loc::En), "0.0");
     }
 
     #[test]

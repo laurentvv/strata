@@ -243,6 +243,12 @@ mod tests {
         let ex = [d.path().join("skip")];
         let r = scan_blocking(d.path(), &Progress::default(), &AtomicBool::new(false), &ex);
         assert_eq!(r.tree.root().unwrap().size, 10);
+        if cfg!(windows) {
+            // Trailing slashes and different casing still exclude on Windows.
+            let ex_ci = [PathBuf::from(format!("{}\\", d.path().join("SKIP").display()))];
+            let r_ci = scan_blocking(d.path(), &Progress::default(), &AtomicBool::new(false), &ex_ci);
+            assert_eq!(r_ci.tree.root().unwrap().size, 10);
+        }
         let mut r2 = scan_simple(d.path());
         let skip = r2.tree.find_child(0, "skip").unwrap();
         r2.tree.remove_subtree(skip);

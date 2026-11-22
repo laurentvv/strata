@@ -3,7 +3,7 @@
 //! `tr("Some English label")` returns the label in the active language. Labels may contain an
 //! `&` accelerator marker, which is stripped (the ribbon and tooltips have no accelerators).
 
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A language the interface is available in besides English.
 pub struct Locale {
@@ -13,7 +13,9 @@ pub struct Locale {
 
 pub static LOCALES: &[Locale] = &[Locale { code: "fr", name: "Français" }];
 
-static CURRENT_CODE: RwLock<String> = RwLock::new(String::new());
+/// Active language index: `0` = English, `1..=LOCALES.len()` = `LOCALES[i - 1]`.
+/// Lock-free so `tr()` (called hundreds of times per frame) never contends or allocates to check the language.
+static CURRENT_LANG: AtomicUsize = AtomicUsize::new(0);
 
 /// Remove `&` accelerators (`&&` is a literal ampersand) and East-Asian style `(&X)` groups.
 pub fn strip_accel(s: &str) -> String {
@@ -45,20 +47,24 @@ pub fn find_locale(code: &str) -> Option<&'static Locale> {
 
 /// Make `code` the active language (unknown codes mean English) and return the one in effect.
 pub fn set_language(code: &str) -> String {
-    let eff = find_locale(code).map_or("en", |l| l.code).to_string();
-    if let Ok(mut g) = CURRENT_CODE.write() {
-        *g = eff.clone();
-    }
-    eff
+    let idx = LOCALES.iter().position(|l| l.code.eq_ignore_ascii_case(code)).map_or(0, |i| i + 1);
+    CURRENT_LANG.store(idx, Ordering::Relaxed);
+    current_code().to_string()
 }
 
+fn current_code() -> &'static str {
+    let idx = CURRENT_LANG.load(Ordering::Relaxed);
+    idx.checked_sub(1).and_then(|i| LOCALES.get(i)).map_or("en", |l| l.code)
+}
+
+#[cfg(test)]
 pub fn current_language() -> String {
-    CURRENT_CODE.read().map(|g| if g.is_empty() { "en".into() } else { g.clone() }).unwrap_or_else(|_| "en".into())
+    current_code().to_string()
 }
 
 /// Translate an English label; English (and unknown labels) come back without accelerators.
 pub fn tr(s: &str) -> String {
-    if current_language() == "fr" {
+    if current_code() == "fr" {
         if let Some(t) = crate::i18n_fr::lookup(s) {
             return t.to_string();
         }

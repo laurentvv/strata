@@ -176,6 +176,7 @@ impl App {
             duplicates::remove_paths(groups, &job.removed);
         }
         self.selected = None;
+        self.props = None;
         self.multi.clear();
         self.cleanup_checked.clear();
         self.view_root = Tree::ROOT;
@@ -191,7 +192,7 @@ impl App {
         }
     }
 
-    fn delete_progress_window(&mut self, ctx: &egui::Context) {
+    fn delete_progress_window(&self, ctx: &egui::Context) {
         let Some(job) = &self.delete_job else { return };
         let (done, total, freed) = (job.done, job.items.len(), job.freed);
         let mut stop = false;

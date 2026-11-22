@@ -173,16 +173,20 @@ impl Live {
         first
     }
 
+    #[cfg(test)]
     fn set_direct(&self, id: NodeId, size: u64, alloc: u64, files: u64, dir_links: u64) {
         let mut d = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
         let n = &mut d.nodes[id as usize];
         (n.size, n.alloc, n.files, n.dirs) = (size, alloc, files, dir_links);
     }
 
-    /// Append the file and link entries of directory `lid` (names are offsets into `names`) to the
-    /// file store, in one short lock, and remember their range on the directory.
-    fn push_files(&self, lid: NodeId, entries: Vec<Node>, names: &str) {
-        let (first, count) = {
+    /// Append the file and link entries of directory `lid` to the file store (if non-empty) and
+    /// commit its direct totals (plus `scanning = false` for leaf dirs) in one `dirs` lock.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_dir(&self, lid: NodeId, entries: Vec<Node>, names: &str, size: u64, alloc: u64, files: u64, dir_links: u64, is_leaf: bool) {
+        let range = if entries.is_empty() {
+            [0, 0]
+        } else {
             let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
             let s = &mut *guard;
             let (first, base) = (s.total, s.names.len() as u32);
@@ -198,14 +202,23 @@ impl Live {
                 }
             }
             s.total += count;
-            (first, count)
+            [first, count]
         };
-        self.dirs.lock().unwrap_or_else(|e| e.into_inner()).files[lid as usize] = [first, count];
+        let mut d = self.dirs.lock().unwrap_or_else(|e| e.into_inner());
+        d.files[lid as usize] = range;
+        let n = &mut d.nodes[lid as usize];
+        (n.size, n.alloc, n.files, n.dirs) = (size, alloc, files, dir_links);
+        if is_leaf {
+            n.scanning = false;
+        }
     }
 
     /// Fold the files of one directory into the live aggregates and the bounded top lists.
     /// `entries` are the directory's records, `names` their (batch-local) name buffer.
     fn record_files(&self, lid: NodeId, entries: &[Node], names: &str) {
+        if entries.is_empty() {
+            return;
+        }
         let name_of = |f: &Node| &names[f.name_off as usize..(f.name_off + f.name_len) as usize];
         let mut local: HashMap<String, (u64, u64, u64)> = HashMap::new();
         let mut buf = String::new();
@@ -233,7 +246,7 @@ impl Live {
         old.sort_by_key(|f| f.modified);
         old.truncate(TOP_N);
         let rank = |f: &&Node| RankedFile { dir: lid, name: name_of(f).to_owned(), size: f.size, modified: f.modified };
-        {
+        if !local.is_empty() {
             let mut t = self.types.lock().unwrap_or_else(|e| e.into_inner());
             for (k, v) in local {
                 let e = t.entry(k).or_default();
@@ -364,8 +377,21 @@ struct Ctx<'a> {
     live: &'a Live,
     progress: &'a Progress,
     cancel: &'a AtomicBool,
-    excludes: &'a [PathBuf],
+    /// Normalised exclude keys (case-insensitive without trailing slashes on Windows; exact paths elsewhere).
+    excludes: Vec<String>,
+    #[cfg(windows)]
+    cluster: u64,
     errors: Mutex<Vec<ScanError>>,
+}
+
+fn exclude_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let trimmed = s.trim_end_matches(['\\', '/']);
+    if cfg!(windows) {
+        trimmed.replace('/', "\\").to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 impl Ctx<'_> {
@@ -400,9 +426,9 @@ fn attrs_of(_meta: &fs::Metadata) -> u32 {
 }
 
 /// Allocated size on disk. Windows: GetCompressedFileSize for compressed/sparse
-/// files, otherwise logical size rounded up to a 4 KiB cluster. Unix: st_blocks.
+/// files, otherwise logical size rounded up to the volume's cluster size. Unix: st_blocks.
 #[cfg(windows)]
-fn allocated(entry: &fs::DirEntry, _meta: &fs::Metadata, logical: u64, attrs: u32) -> u64 {
+fn allocated(entry: &fs::DirEntry, _meta: &fs::Metadata, logical: u64, attrs: u32, cluster: u64) -> u64 {
     if logical == 0 {
         return 0;
     }
@@ -417,7 +443,7 @@ fn allocated(entry: &fs::DirEntry, _meta: &fs::Metadata, logical: u64, attrs: u3
             return ((high as u64) << 32) | low as u64;
         }
     }
-    logical.div_ceil(CLUSTER) * CLUSTER
+    logical.div_ceil(cluster) * cluster
 }
 #[cfg(not(windows))]
 fn allocated(_entry: &fs::DirEntry, meta: &fs::Metadata, _logical: u64, _attrs: u32) -> u64 {
@@ -460,8 +486,8 @@ fn walk(path: &Path, ctx: &Ctx, lid: NodeId) {
             }
         };
         if !ctx.excludes.is_empty() {
-            let epath = entry.path();
-            if ctx.excludes.iter().any(|x| x == &epath) {
+            let ekey = exclude_key(&entry.path());
+            if ctx.excludes.iter().any(|x| x == &ekey) {
                 continue;
             }
         }
@@ -490,6 +516,9 @@ fn walk(path: &Path, ctx: &Ctx, lid: NodeId) {
             (0, 0)
         } else {
             let logical = emeta.len();
+            #[cfg(windows)]
+            let alloc = allocated(&entry, &emeta, logical, attrs, ctx.cluster);
+            #[cfg(not(windows))]
             let alloc = allocated(&entry, &emeta, logical, attrs);
             ctx.progress.files.fetch_add(1, Ordering::Relaxed);
             ctx.progress.bytes.fetch_add(logical, Ordering::Relaxed);
@@ -513,7 +542,8 @@ fn walk(path: &Path, ctx: &Ctx, lid: NodeId) {
         batch_names.push_str(&ename);
     }
     // Registered before they are read so the folders show up in the live tree at once.
-    let first_sub = if subs.is_empty() {
+    let is_leaf = subs.is_empty();
+    let first_sub = if is_leaf {
         NONE
     } else {
         ctx.live.add_dirs(
@@ -522,11 +552,12 @@ fn walk(path: &Path, ctx: &Ctx, lid: NodeId) {
         )
     };
     ctx.live.record_files(lid, &batch, &batch_names);
-    ctx.live.push_files(lid, batch, &batch_names);
+    ctx.live.commit_dir(lid, batch, &batch_names, d_size, d_alloc, d_files, d_links, is_leaf);
     drop(batch_names);
-    ctx.live.set_direct(lid, d_size, d_alloc, d_files, d_links);
-    subs.par_iter().enumerate().for_each(|(i, (p, _, _))| walk(p, ctx, first_sub + i as NodeId));
-    ctx.live.finish(lid);
+    if !is_leaf {
+        subs.par_iter().enumerate().for_each(|(i, (p, _, _))| walk(p, ctx, first_sub + i as NodeId));
+        ctx.live.finish(lid);
+    }
 }
 
 /// Scan `root` synchronously (blocks the calling thread). Cancel via `cancel`.
@@ -540,7 +571,15 @@ pub fn scan_blocking(root: &Path, progress: &Progress, cancel: &AtomicBool, excl
 pub fn scan_live(root: &Path, progress: &Progress, cancel: &AtomicBool, excludes: &[PathBuf], sink: Option<Sink>) -> ScanResult {
     let start = Instant::now();
     let live = Live::default();
-    let ctx = Ctx { live: &live, progress, cancel, excludes, errors: Mutex::new(Vec::new()) };
+    let ctx = Ctx {
+        live: &live,
+        progress,
+        cancel,
+        excludes: excludes.iter().map(|p| exclude_key(p)).collect(),
+        #[cfg(windows)]
+        cluster: super::disk_info(root).map(|d| d.cluster as u64).filter(|&c| c > 0).unwrap_or(CLUSTER),
+        errors: Mutex::new(Vec::new()),
+    };
     let root_name = root.to_string_lossy();
     let meta = fs::metadata(root).ok();
     let rid = live.add_dirs(NONE, [(root_name, meta.as_ref().map(mtime).unwrap_or(0), meta.as_ref().map(attrs_of).unwrap_or(0))]);
@@ -718,7 +757,7 @@ mod tests {
         for e in fs::read_dir(dir).unwrap() {
             let e = e.unwrap();
             let name = e.file_name().to_string_lossy().into_owned();
-            let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let child = if rel.is_empty() { name } else { format!("{rel}/{name}") };
             let meta = e.metadata().unwrap();
             let ft = meta.file_type();
             let is_link = ft.is_symlink() || (attrs_of(&meta) & FILE_ATTRIBUTE_REPARSE_POINT != 0 && ft.is_dir());
@@ -890,7 +929,15 @@ mod tests {
         let live = Live::default();
         let progress = Progress::default();
         let cancel = AtomicBool::new(false);
-        let ctx = Ctx { live: &live, progress: &progress, cancel: &cancel, excludes: &[], errors: Mutex::new(Vec::new()) };
+        let ctx = Ctx {
+            live: &live,
+            progress: &progress,
+            cancel: &cancel,
+            excludes: Vec::new(),
+            #[cfg(windows)]
+            cluster: CLUSTER,
+            errors: Mutex::new(Vec::new()),
+        };
         let name = tmp.path().to_string_lossy();
         let rid = live.add_dirs(NONE, [(name, 0, 0)]);
         let finished = AtomicBool::new(false);

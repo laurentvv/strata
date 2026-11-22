@@ -30,22 +30,20 @@ impl Filter {
     }
 
     /// Does a file with these properties pass the filter?
+    #[cfg(test)]
     pub fn matches_file(&self, name: &str, size: u64, modified: i64) -> bool {
-        let pat = self.name.trim();
-        if !pat.is_empty() {
-            let ok = if pat.contains(['*', '?']) {
-                glob_match(pat, name)
-            } else {
-                name.to_lowercase().contains(&pat.to_lowercase())
-            };
-            if !ok {
-                return false;
-            }
-        }
+        let matcher = NameMatcher::new(&self.name);
+        self.matches_with(&matcher, name, size, modified)
+    }
+
+    fn matches_with(&self, matcher: &NameMatcher, name: &str, size: u64, modified: i64) -> bool {
         if self.min_size.is_some_and(|m| size < m) || self.max_size.is_some_and(|m| size > m) {
             return false;
         }
         if self.modified_after.is_some_and(|t| modified < t) || self.modified_before.is_some_and(|t| modified >= t) {
+            return false;
+        }
+        if !matcher.matches(name) {
             return false;
         }
         if !self.exts.is_empty() {
@@ -59,8 +57,13 @@ impl Filter {
 }
 
 /// Case-insensitive glob with `*` (any run) and `?` (one char).
+#[cfg(test)]
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    glob_match_prelowered(&p, text)
+}
+
+fn glob_match_prelowered(p: &[char], text: &str) -> bool {
     let t: Vec<char> = text.to_lowercase().chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star, mut mark) = (usize::MAX, 0usize);
@@ -84,6 +87,38 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+/// Pre-compiled name matcher so `matching_set` does not re-lowercase/re-split the pattern per file.
+enum NameMatcher {
+    Any,
+    Glob(Vec<char>),
+    AsciiSub(Vec<u8>),
+    UnicodeSub(String),
+}
+
+impl NameMatcher {
+    fn new(raw: &str) -> Self {
+        let pat = raw.trim();
+        if pat.is_empty() {
+            Self::Any
+        } else if pat.contains(['*', '?']) {
+            Self::Glob(pat.to_lowercase().chars().collect())
+        } else if pat.is_ascii() {
+            Self::AsciiSub(pat.to_ascii_lowercase().into_bytes())
+        } else {
+            Self::UnicodeSub(pat.to_lowercase())
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Glob(p) => glob_match_prelowered(p, name),
+            Self::AsciiSub(nb) => name.as_bytes().windows(nb.len()).any(|w| w.eq_ignore_ascii_case(nb)),
+            Self::UnicodeSub(sub) => name.to_lowercase().contains(sub.as_str()),
+        }
+    }
 }
 
 /// Parse "1024", "10KB", "1.5 MB", "2g" (binary multiples). Empty -> `Ok(None)`.
@@ -137,6 +172,7 @@ pub fn matching_set(tree: &Tree, filter: &Filter) -> HashSet<NodeId> {
     if tree.nodes.is_empty() {
         return set;
     }
+    let matcher = NameMatcher::new(&filter.name);
     // Iterative post-order over children (detached subtrees are never reached).
     let mut order: Vec<NodeId> = Vec::new();
     let mut stack = vec![Tree::ROOT];
@@ -150,7 +186,7 @@ pub fn matching_set(tree: &Tree, filter: &Filter) -> HashSet<NodeId> {
             if tree.children(id).iter().any(|c| set.contains(c)) {
                 set.insert(id);
             }
-        } else if filter.matches_file(tree.name(id), n.size, n.modified) {
+        } else if filter.matches_with(&matcher, tree.name(id), n.size, n.modified) {
             set.insert(id);
         }
     }

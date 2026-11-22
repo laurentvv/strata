@@ -1,7 +1,7 @@
 //! Headless CLI mode (`--cli <path> [--depth N]`): prints the scanned tree.
 
 use crate::scan::{format_bytes, model::normalize_root, scan_simple, NodeId, Tree};
-use colored::*;
+use colored::Colorize;
 use std::path::PathBuf;
 
 fn print_node(tree: &Tree, id: NodeId, prefix: &str, is_last: bool, max_depth: usize, depth: usize) {
@@ -48,11 +48,15 @@ pub struct CliOptions {
     pub target: PathBuf,
     pub max_depth: usize,
     /// `--export FILE` (csv / json / html chosen by extension).
-    pub export: Option<PathBuf>,
+    pub export: Option<(PathBuf, crate::export::Format)>,
     /// `--changes`: compare with the previous stored scan of the same root and store this one.
     pub changes: bool,
     /// `--cleanup`: list reclaimable folders (node_modules, build output, ...).
     pub cleanup: bool,
+    /// `--json`: print a single machine-readable JSON object on stdout instead of formatted text.
+    pub json: bool,
+    /// `--fail-over SIZE`: exit with code 3 when the scanned total exceeds this byte threshold.
+    pub fail_over: Option<u64>,
     /// `--fast`: read the NTFS Master File Table of a whole drive (administrator only), falling
     /// back to the regular scan with a message when it cannot be used.
     pub fast: bool,
@@ -70,13 +74,21 @@ pub fn parse_args(args: &[String]) -> Result<CliOptions, String> {
             "--export" => {
                 i += 1;
                 let p = PathBuf::from(args.get(i).ok_or("--export needs a file name")?);
-                if crate::export::Format::from_path(&p).is_none() {
-                    return Err(format!("--export: unknown format for {} (use .csv, .json or .html)", p.display()));
-                }
-                o.export = Some(p);
+                let fmt = crate::export::Format::from_path(&p)
+                    .ok_or_else(|| format!("--export: unknown format for {} (use .csv, .json or .html)", p.display()))?;
+                o.export = Some((p, fmt));
             }
             "--changes" => o.changes = true,
             "--cleanup" => o.cleanup = true,
+            "--json" => o.json = true,
+            "--fail-over" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--fail-over needs a size (e.g. 10GB)")?;
+                let bytes = crate::analysis::filter::parse_size(raw)
+                    .map_err(|e| format!("--fail-over: {e}"))?
+                    .ok_or("--fail-over needs a size (e.g. 10GB)")?;
+                o.fail_over = Some(bytes);
+            }
             "--fast" => o.fast = true,
             other if !other.starts_with('-') => o.target = PathBuf::from(other),
             other => return Err(format!("unknown option {other}")),
@@ -84,6 +96,98 @@ pub fn parse_args(args: &[String]) -> Result<CliOptions, String> {
         i += 1;
     }
     Ok(o)
+}
+
+/// Build the structured JSON summary for `--cli --json`.
+fn build_json_report(
+    res: &crate::scan::ScanResult,
+    opts: &CliOptions,
+    changes: Option<(i64, Vec<crate::analysis::snapshot::DirDelta>)>,
+    now_secs: i64,
+) -> serde_json::Value {
+    let root = res.tree.root();
+    let (size, alloc, files, dirs) = root.map_or((0, 0, 0, 0), |r| (r.size, r.alloc, r.files, r.dirs));
+    let (hl_count, hl_alloc) = res.tree.hardlink_dup_stats(Tree::ROOT);
+    let mut doc = serde_json::json!({
+        "root": res.root.display().to_string(),
+        "size_bytes": size,
+        "allocated_bytes": alloc,
+        "files": files,
+        "folders": dirs,
+        "errors": res.errors.len(),
+        "cancelled": res.cancelled,
+        "elapsed_ms": res.elapsed.as_millis() as u64,
+    });
+    if hl_alloc > 0 {
+        doc["unique_allocated_bytes"] = serde_json::json!(alloc.saturating_sub(hl_alloc));
+        doc["hardlink_duplicates"] = serde_json::json!(hl_count);
+    }
+    if opts.cleanup {
+        use crate::analysis::insights;
+        let found = insights::reclaimable(&res.tree);
+        let total: u64 = found.iter().map(|f| f.size).sum();
+        let reclaimable: Vec<_> = found
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": res.tree.path_of(f.id).display().to_string(),
+                    "kind": f.kind,
+                    "risk": f.risk.label(),
+                    "size_bytes": f.size,
+                })
+            })
+            .collect();
+        let empty: Vec<String> = insights::empty_dirs(&res.tree).into_iter().map(|id| res.tree.path_of(id).display().to_string()).collect();
+        let old: Vec<_> = insights::large_old_files(&res.tree, now_secs, 100 << 20, 365, 20)
+            .into_iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": res.tree.path_of(f.id).display().to_string(),
+                    "size_bytes": f.size,
+                    "age_days": f.age_days,
+                })
+            })
+            .collect();
+        doc["cleanup"] = serde_json::json!({
+            "total_bytes": total,
+            "reclaimable": reclaimable,
+            "empty_dirs": empty,
+            "large_old_files": old,
+        });
+    }
+    if opts.changes {
+        use crate::analysis::snapshot::ChangeKind;
+        doc["changes"] = match changes {
+            None => serde_json::json!({ "previous_taken": null, "items": [] }),
+            Some((taken, list)) => {
+                let items: Vec<_> = list
+                    .iter()
+                    .map(|c| {
+                        let kind = match c.kind {
+                            ChangeKind::Added => "added",
+                            ChangeKind::Removed => "removed",
+                            ChangeKind::Changed => "changed",
+                        };
+                        serde_json::json!({
+                            "path": if c.path.is_empty() { "." } else { c.path.as_str() },
+                            "kind": kind,
+                            "old_size_bytes": c.old_size,
+                            "new_size_bytes": c.new_size,
+                            "delta_bytes": c.delta(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "previous_taken": taken, "items": items })
+            }
+        };
+    }
+    if let Some(limit) = opts.fail_over {
+        doc["threshold"] = serde_json::json!({
+            "limit_bytes": limit,
+            "exceeded": size > limit,
+        });
+    }
+    doc
 }
 
 fn print_changes(tree: &Tree) {
@@ -137,13 +241,17 @@ pub fn run(args: &[String]) {
     let canon = std::fs::canonicalize(&target).unwrap_or(target);
     let canon = PathBuf::from(crate::scan::model::strip_verbatim(&canon.to_string_lossy()));
     let abs = normalize_root(&canon);
-    println!("\n  {} - {}", "Strata".bold().yellow(), "CLI mode".white());
-    println!("  Target: {}\n", abs.display().to_string().cyan());
+    if !opts.json {
+        println!("\n  {} - {}", "Strata".bold().yellow(), "CLI mode".white());
+        println!("  Target: {}\n", abs.display().to_string().cyan());
+    }
     let res = if opts.fast {
         let (progress, cancel) = (crate::scan::walker::Progress::default(), std::sync::atomic::AtomicBool::new(false));
         match crate::scan::mft::try_fast_scan(&abs, &progress, &cancel, &[]) {
             Ok(r) => {
-                println!("  Mode: NTFS Master File Table\n");
+                if !opts.json {
+                    println!("  Mode: NTFS Master File Table\n");
+                }
                 r
             }
             Err(msg) => {
@@ -154,37 +262,63 @@ pub fn run(args: &[String]) {
     } else {
         scan_simple(&abs)
     };
-    print_node(&res.tree, 0, "", true, max_depth, 0);
     let root = res.tree.root().expect("root");
-    println!(
-        "\n  Scanned: {} ({} on disk) in {} files across {} directories; {} errors",
-        format_bytes(root.size).bold().white(),
-        format_bytes(root.alloc),
-        root.files.to_string().cyan(),
-        root.dirs.to_string().cyan(),
-        res.errors.len()
-    );
-    println!("  Time elapsed: {}\n", format!("{:.2?}", res.elapsed).bold().green());
-    let denied = crate::scan::access_denied_count(&res.errors);
-    if denied > 0 && cfg!(windows) && !crate::scan::mft::is_elevated() {
-        eprintln!("  Note: {denied} folders could not be read (access denied). Run Strata from an elevated terminal for a complete result.\n");
+    let now_secs = chrono::Utc::now().timestamp();
+    if opts.json {
+        let changes = if opts.changes {
+            crate::analysis::snapshot::history_dir().and_then(|dir| crate::analysis::snapshot::record_and_compare(&dir, &res.tree, now_secs))
+        } else {
+            None
+        };
+        let doc = build_json_report(&res, &opts, changes, now_secs);
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".into()));
+    } else {
+        print_node(&res.tree, 0, "", true, max_depth, 0);
+        let (hl_count, hl_alloc) = res.tree.hardlink_dup_stats(Tree::ROOT);
+        let unique_note = if hl_alloc > 0 {
+            format!(", {} unique across {} hard links", format_bytes(root.alloc.saturating_sub(hl_alloc)), hl_count)
+        } else {
+            String::new()
+        };
+        println!(
+            "\n  Scanned: {} ({} on disk{unique_note}) in {} files across {} directories; {} errors",
+            format_bytes(root.size).bold().white(),
+            format_bytes(root.alloc),
+            root.files.to_string().cyan(),
+            root.dirs.to_string().cyan(),
+            res.errors.len()
+        );
+        println!("  Time elapsed: {}\n", format!("{:.2?}", res.elapsed).bold().green());
+        let denied = crate::scan::access_denied_count(&res.errors);
+        if denied > 0 && cfg!(windows) && !crate::scan::mft::is_elevated() {
+            eprintln!("  Note: {denied} folders could not be read (access denied). Run Strata from an elevated terminal for a complete result.\n");
+        }
+        if opts.cleanup {
+            print_cleanup(&res.tree);
+            println!();
+        }
+        if opts.changes {
+            print_changes(&res.tree);
+            println!();
+        }
     }
-    if opts.cleanup {
-        print_cleanup(&res.tree);
-        println!();
-    }
-    if opts.changes {
-        print_changes(&res.tree);
-        println!();
-    }
-    if let Some(path) = &opts.export {
-        let fmt = crate::export::Format::from_path(path).expect("validated by parse_args");
-        match crate::export::export_to_file(&res.tree, Tree::ROOT, fmt, 8, path) {
-            Ok(()) => println!("  Exported to {}\n", path.display()),
+    if let Some((path, fmt)) = &opts.export {
+        match crate::export::export_to_file(&res.tree, Tree::ROOT, *fmt, 8, path) {
+            Ok(()) => {
+                if !opts.json {
+                    println!("  Exported to {}\n", path.display());
+                }
+            }
             Err(e) => {
                 eprintln!("error: cannot write {}: {e}", path.display());
                 std::process::exit(1);
             }
+        }
+    }
+    if let Some(limit) = opts.fail_over {
+        if root.size > limit {
+            eprintln!("threshold exceeded: {} > {}", format_bytes(root.size), format_bytes(limit));
+            std::process::exit(3);
         }
     }
 }
@@ -203,12 +337,33 @@ mod tests {
         assert_eq!((o.max_depth, o.changes, o.cleanup, o.fast), (5, true, true, false));
         assert!(parse_args(&a(&["D:\\", "--fast"])).unwrap().fast);
         assert_eq!(o.target, PathBuf::from("C:\\data"));
-        assert_eq!(o.export, Some(PathBuf::from("out.CSV")));
+        assert_eq!(o.export, Some((PathBuf::from("out.CSV"), crate::export::Format::Csv)));
         assert_eq!(parse_args(&a(&[])).unwrap().max_depth, 3);
         assert!(parse_args(&a(&["--export", "x.txt"])).unwrap_err().contains("unknown format"));
         assert!(parse_args(&a(&["--export"])).is_err());
         assert!(parse_args(&a(&["-d", "many"])).is_err());
         assert!(parse_args(&a(&["--nope"])).unwrap_err().contains("--nope"));
+        let j = parse_args(&a(&["C:\\data", "--json", "--fail-over", "10MB"])).unwrap();
+        assert!(j.json && j.fail_over == Some(10 * 1024 * 1024));
+        assert!(parse_args(&a(&["--fail-over"])).is_err());
+        assert!(parse_args(&a(&["--fail-over", "bogus"])).is_err());
+    }
+
+    #[test]
+    fn json_report_includes_cleanup_changes_and_threshold() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("web/node_modules/pkg")).unwrap();
+        std::fs::write(d.path().join("web/package-lock.json"), b"{}").unwrap();
+        std::fs::write(d.path().join("web/node_modules/pkg/a.js"), vec![1u8; 4096]).unwrap();
+        let res = scan_simple(d.path());
+        let opts = CliOptions { cleanup: true, changes: true, json: true, fail_over: Some(1024), ..Default::default() };
+        let doc = build_json_report(&res, &opts, None, 2_000_000_000);
+        assert_eq!(doc["size_bytes"], 4098);
+        assert_eq!(doc["cleanup"]["total_bytes"], 4096);
+        assert_eq!(doc["cleanup"]["reclaimable"][0]["kind"], "Node.js dependencies");
+        assert!(doc["changes"]["previous_taken"].is_null());
+        assert_eq!(doc["threshold"]["limit_bytes"], 1024);
+        assert_eq!(doc["threshold"]["exceeded"], true);
     }
 
     #[test]

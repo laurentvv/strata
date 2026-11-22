@@ -360,9 +360,13 @@ pub struct App {
     oldest_cache: Option<Vec<views::RankedRow>>,
     cleanup_cache: Option<Vec<views::CleanRow>>,
     age_cache: Option<Vec<AgeBucket>>,
-    /// "System space" view: what the scan found, and the command last copied.
+    /// "System space" view: what the scan found, deduplicated root alloc cache, and the command last copied.
     system_cache: Option<Vec<crate::analysis::system_space::Found>>,
+    root_unique_alloc: Option<u64>,
+    props_hl: Option<(NodeId, u64, u64)>,
     system_copied: Option<String>,
+    tree_gen: u64,
+    treemap_cache: views::TreemapCache,
     dup_run: Option<DupRun>,
     dup_result: Option<Vec<DupGroup>>,
     dup_min: String,
@@ -723,7 +727,11 @@ impl App {
             cleanup_cache: None,
             age_cache: None,
             system_cache: None,
+            root_unique_alloc: None,
+            props_hl: None,
             system_copied: None,
+            tree_gen: 0,
+            treemap_cache: views::TreemapCache::default(),
             dup_run: None,
             dup_result: None,
             dup_min: "64KB".into(),
@@ -825,7 +833,9 @@ impl App {
         self.expanded.insert(Tree::ROOT);
         self.files_expanded.clear();
         self.selected = None;
+        self.multi.clear();
         self.props = None;
+        self.name_dialog = None;
         self.view_root = Tree::ROOT;
         self.loaded = Some(Loaded {
             tree: Tree::placeholder(&root.to_string_lossy()),
@@ -1051,6 +1061,8 @@ impl App {
 
     /// Drop every cache derived from the tree (after a scan or a structural change).
     fn invalidate(&mut self) {
+        self.tree_gen = self.tree_gen.wrapping_add(1);
+        self.treemap_cache.clear();
         self.sorted.clear();
         self.rows_dirty = true;
         self.filter_set = None;
@@ -1060,6 +1072,8 @@ impl App {
         self.cleanup_cache = None;
         self.age_cache = None;
         self.system_cache = None;
+        self.root_unique_alloc = None;
+        self.props_hl = None;
         self.find_stale = true;
     }
 
@@ -2220,14 +2234,16 @@ impl App {
                 None => views::rows_from_ids(&l.tree, &types::oldest_files(&l.tree, Tree::ROOT, 100)),
             });
         }
+        let style = (self.view == ViewKind::Treemap).then(|| self.map_style(self.view_root));
         let Some(l) = &self.loaded else { return };
         let tree = &l.tree;
         let mut ev = None;
         let mut picked_ext = None;
         match self.view {
             ViewKind::Treemap => {
-                let style = self.map_style(self.view_root);
-                ev = views::treemap_view(ui, tree, &mut self.view_root, &mut self.selected, false, &style)
+                if let Some(style) = style {
+                    ev = views::treemap_view(ui, tree, self.tree_gen, &mut self.treemap_cache, &mut self.view_root, &mut self.selected, false, &style);
+                }
             }
             ViewKind::Chart => views::chart_view(ui, tree, &mut self.view_root),
             ViewKind::Types => picked_ext = views::types_view(ui, self.types_cache.as_deref().unwrap_or(&[])),
@@ -2285,6 +2301,17 @@ impl App {
                     MenuAct::Properties => vec![Action::ShellProps(id)],
                     MenuAct::Delete => vec![Action::Delete(id)],
                     MenuAct::Reveal => vec![Action::Reveal(id)],
+                    MenuAct::IgnoreCleanup => {
+                        if let Some(l) = &self.loaded {
+                            let key = cleanup_ignore_key(&l.tree.path_of(id).to_string_lossy());
+                            if !self.settings.cleanup_ignored.iter().any(|p| cleanup_ignore_key(p) == key) {
+                                self.settings.cleanup_ignored.push(l.tree.path_of(id).to_string_lossy().into_owned());
+                            }
+                            self.cleanup_checked.remove(&id);
+                            self.cleanup_cache = None;
+                        }
+                        Vec::new()
+                    }
                 };
                 self.apply(ctx, actions);
             }
@@ -2354,9 +2381,6 @@ impl App {
                     }
                 }
             }
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::F5) {
-                cmds.push(Cmd::Refresh);
-            }
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace) {
                 cmds.push(Cmd::ParentFolder);
             }
@@ -2374,8 +2398,15 @@ impl App {
             self.navigate(k);
         }
         if copy {
-            if let (Some(id), Some(l)) = (self.selected, &self.loaded) {
-                ctx.copy_text(l.tree.path_of(id).to_string_lossy().into_owned());
+            if let Some(l) = &self.loaded {
+                if self.multi.len() > 1 {
+                    let mut ids: Vec<NodeId> = self.multi.iter().copied().collect();
+                    ids.sort_unstable();
+                    let text = ids.iter().map(|&i| l.tree.path_of(i).to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
+                    ctx.copy_text(text);
+                } else if let Some(id) = self.selected {
+                    ctx.copy_text(l.tree.path_of(id).to_string_lossy().into_owned());
+                }
             }
         }
         for c in cmds {
@@ -2530,7 +2561,7 @@ impl App {
         }
     }
 
-    fn take_screenshot_event(&mut self, ctx: &egui::Context) {
+    fn take_screenshot_event(&self, ctx: &egui::Context) {
         let Some(shot) = &self.shot else { return };
         let img = ctx.input(|i| {
             i.events.iter().find_map(|e| match e {
@@ -2596,6 +2627,10 @@ impl App {
         if !right {
             ui.add_space(5.0);
         }
+        let style = self.map_style(root);
+        let tree_gen = self.tree_gen;
+        let Some(l) = &self.loaded else { return };
+        let tree = &l.tree;
         let margin = egui::Margin { left: if right { 7 } else { 0 }, ..Default::default() };
         let (close, ev) = egui::Frame::new()
             .inner_margin(margin)
@@ -2609,8 +2644,7 @@ impl App {
                     });
                 });
                 let mut sel = self.selected;
-                let style = self.map_style(root);
-                let ev = views::treemap_view(ui, tree, &mut root, &mut sel, true, &style);
+                let ev = views::treemap_view(ui, tree, tree_gen, &mut self.treemap_cache, &mut root, &mut sel, true, &style);
                 (close, ev)
             })
             .inner;
@@ -2782,20 +2816,31 @@ impl App {
         }
         if self.cleanup_cache.is_none() {
             let tree = &l.tree;
+            let ignored: HashSet<String> = self.settings.cleanup_ignored.iter().map(|p| cleanup_ignore_key(p)).collect();
+            let keep = |path: &str| ignored.is_empty() || !ignored.contains(&cleanup_ignore_key(path));
             let mut rows: Vec<views::CleanRow> = insights::reclaimable(tree)
                 .into_iter()
-                .map(|r| views::CleanRow { id: r.id, kind: tr(r.kind), risk: r.risk, path: tree.path_of(r.id).to_string_lossy().into_owned(), size: r.size })
+                .filter_map(|r| {
+                    let path = tree.path_of(r.id).to_string_lossy().into_owned();
+                    keep(&path).then_some(views::CleanRow { id: r.id, kind: tr(r.kind), risk: r.risk, path, size: r.size })
+                })
                 .collect();
             let empty = tr("Empty folder");
             let old = tr("Large file, not modified for over a year");
-            rows.extend(insights::large_old_files(tree, chrono::Utc::now().timestamp(), 100 << 20, 365, 50).into_iter().map(|f| views::CleanRow {
-                id: f.id,
-                kind: old.clone(),
-                risk: insights::Risk::Check,
-                path: tree.path_of(f.id).to_string_lossy().into_owned(),
-                size: f.size,
+            rows.extend(insights::large_old_files(tree, chrono::Utc::now().timestamp(), 100 << 20, 365, 50).into_iter().filter_map(|f| {
+                let path = tree.path_of(f.id).to_string_lossy().into_owned();
+                keep(&path).then_some(views::CleanRow {
+                    id: f.id,
+                    kind: old.clone(),
+                    risk: insights::Risk::Check,
+                    path,
+                    size: f.size,
+                })
             }));
-            rows.extend(insights::empty_dirs(tree).into_iter().map(|id| views::CleanRow { id, kind: empty.clone(), risk: insights::Risk::Safe, path: tree.path_of(id).to_string_lossy().into_owned(), size: 0 }));
+            rows.extend(insights::empty_dirs(tree).into_iter().filter_map(|id| {
+                let path = tree.path_of(id).to_string_lossy().into_owned();
+                keep(&path).then_some(views::CleanRow { id, kind: empty.clone(), risk: insights::Risk::Safe, path, size: 0 })
+            }));
             self.cleanup_cache = Some(rows);
         }
         let rows = self.cleanup_cache.clone().unwrap_or_default();
@@ -2820,6 +2865,13 @@ impl App {
                 let ids: Vec<NodeId> = self.cleanup_checked.iter().copied().collect();
                 self.ask_delete_nodes(ids);
             }
+            if !self.settings.cleanup_ignored.is_empty() {
+                let n = self.settings.cleanup_ignored.len();
+                if ui.button(format!("{} ({n})", tr("Show ignored again"))).clicked() {
+                    self.settings.cleanup_ignored.clear();
+                    self.cleanup_cache = None;
+                }
+            }
         });
         ui.horizontal(|ui| {
             if cfg!(windows) {
@@ -2842,6 +2894,9 @@ impl App {
     fn name_window(&mut self, ctx: &egui::Context) {
         let Some(mut d) = self.name_dialog.take() else { return };
         let Some(l) = &self.loaded else { return };
+        if (d.id as usize) >= l.tree.nodes.len() {
+            return;
+        }
         let path = l.tree.path_of(d.id);
         let title = tr(if d.new_folder { "New folder" } else { "Rename" });
         let (mut ok, mut cancel) = (false, false);
@@ -2913,31 +2968,56 @@ impl App {
         self.name_window(ctx);
         self.about_window(ctx);
         if let (Some(id), Some(l)) = (self.props, &self.loaded) {
-            let mut open = true;
-            let n = l.tree.get(id);
-            egui::Window::new(tr("Properties")).open(&mut open).collapsible(false).show(ctx, |ui| {
-                ui.label(RichText::new(l.tree.path_of(id).to_string_lossy()).strong());
-                ui.separator();
-                egui::Grid::new("props").num_columns(2).show(ui, |ui| {
-                    let mut kv = |k: &str, v: String| {
-                        ui.label(k);
-                        ui.label(v);
-                        ui.end_row();
-                    };
-                    let kind = if n.is_link { "Link / junction" } else if n.is_dir { "Folder" } else { "File" };
-                    kv(&tr("Type"), tr(kind));
-                    kv(&tr("Size"), format!("{} ({} bytes)", format_bytes(n.size), n.size));
-                    kv(&tr("Allocated"), format!("{} ({} bytes)", format_bytes(n.alloc), n.alloc));
-                    if n.is_dir {
-                        kv(&tr("Files"), n.files.to_string());
-                        kv(&tr("Folders"), n.dirs.to_string());
-                    }
-                    kv(&tr("Last Modified"), format_time(n.modified));
-                    kv(&tr("Attributes"), format!("0x{:08X}", n.attrs));
-                });
-            });
-            if !open {
+            if (id as usize) >= l.tree.nodes.len() {
                 self.props = None;
+                self.props_hl = None;
+            } else {
+                let mut open = true;
+                let n = l.tree.get(id);
+                let hl = if n.is_dir {
+                    match self.props_hl {
+                        Some((cached_id, c, a)) if cached_id == id => (c, a),
+                        _ => {
+                            let (c, a) = l.tree.hardlink_dup_stats(id);
+                            self.props_hl = Some((id, c, a));
+                            (c, a)
+                        }
+                    }
+                } else {
+                    (0, 0)
+                };
+                egui::Window::new(tr("Properties")).open(&mut open).collapsible(false).show(ctx, |ui| {
+                    ui.label(RichText::new(l.tree.path_of(id).to_string_lossy()).strong());
+                    ui.separator();
+                    egui::Grid::new("props").num_columns(2).show(ui, |ui| {
+                        let mut kv = |k: &str, v: String| {
+                            ui.label(k);
+                            ui.label(v);
+                            ui.end_row();
+                        };
+                        let kind = if n.is_link { "Link / junction" } else if n.is_dir { "Folder" } else { "File" };
+                        kv(&tr("Type"), tr(kind));
+                        kv(&tr("Size"), format!("{} ({} bytes)", format_bytes(n.size), fmt::group_int(n.size)));
+                        kv(&tr("Allocated"), format!("{} ({} bytes)", format_bytes(n.alloc), fmt::group_int(n.alloc)));
+                        if n.is_dir {
+                            let (hl_count, hl_alloc) = hl;
+                            if hl_alloc > 0 {
+                                kv(
+                                    &tr("Unique on disk"),
+                                    format!("{} ({} {})", format_bytes(n.alloc.saturating_sub(hl_alloc)), fmt::group_int(hl_count), tr("hard links")),
+                                );
+                            }
+                            kv(&tr("Files"), fmt::group_int(n.files));
+                            kv(&tr("Folders"), fmt::group_int(n.dirs));
+                        }
+                        kv(&tr("Last Modified"), format_time(n.modified));
+                        kv(&tr("Attributes"), format!("0x{:08X}", n.attrs));
+                    });
+                });
+                if !open {
+                    self.props = None;
+                    self.props_hl = None;
+                }
             }
         }
         if self.show_errors {
@@ -2988,9 +3068,50 @@ fn progress_bar(ui: &mut egui::Ui, frac: Option<f32>) {
     p.rect_filled(bar, 2.0, fill);
 }
 
+/// Normalise a clean-up ignore path (case-insensitive without trailing slashes on Windows).
+fn cleanup_ignore_key(p: &str) -> String {
+    let trimmed = p.trim_end_matches(['\\', '/']);
+    if cfg!(windows) {
+        trimmed.replace('/', "\\").to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// A single path component that Windows accepts (no separators or reserved characters).
 fn valid_file_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|'])
+}
+
+/// Quote a single path argument for Windows `CommandLineToArgvW` (doubles trailing backslashes
+/// before the closing quote so `C:\` becomes `"C:\\"`, not `"C:\"`). `None` for an empty path.
+#[cfg(any(windows, test))]
+fn quote_windows_arg(path: &std::path::Path) -> Option<String> {
+    let s = path.to_string_lossy();
+    if s.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len() + 4);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in s.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push(ch);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    Some(out)
 }
 
 /// Relaunch this program elevated (UAC prompt) on `path`; `true` when the new process was started.
@@ -3003,9 +3124,10 @@ fn restart_as_admin(path: &std::path::Path) -> bool {
         let Ok(exe) = std::env::current_exe() else { return false };
         let verb = wide(std::ffi::OsStr::new("runas"));
         let file = wide(exe.as_os_str());
-        let params = wide(std::ffi::OsStr::new(&format!("\"{}\"", path.display())));
-        // SAFETY: all strings are NUL-terminated and outlive the call; null window/directory are allowed.
-        let rc = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), params.as_ptr(), std::ptr::null(), 1) } as usize;
+        let params = quote_windows_arg(path).map(|p| wide(std::ffi::OsStr::new(&p)));
+        let params_ptr = params.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
+        // SAFETY: all strings are NUL-terminated and outlive the call; null window/params/directory are allowed.
+        let rc = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), params_ptr, std::ptr::null(), 1) } as usize;
         rc > 32
     }
     #[cfg(not(windows))]
@@ -3057,7 +3179,7 @@ impl App {
         self.poll_update(&ctx);
         self.poll_sub_scan();
         self.poll_duplicates();
-        if self.handle.is_some() || self.dup_run.is_some() {
+        if self.handle.is_some() || self.sub_scan.is_some() || self.dup_run.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         self.handle_keys(&ctx);
@@ -3334,5 +3456,14 @@ mod tests {
         // a live snapshot has no file nodes but still reports direct files
         let live = Tree::placeholder("R");
         assert!(!expandable(&live, 0));
+    }
+
+    #[test]
+    fn windows_admin_arg_quotes_trailing_backslashes_and_skips_empty() {
+        assert_eq!(quote_windows_arg(std::path::Path::new("")), None);
+        assert_eq!(quote_windows_arg(std::path::Path::new(r"C:\")).as_deref(), Some(r#""C:\\""#));
+        assert_eq!(quote_windows_arg(std::path::Path::new(r"C:\Program Files\")).as_deref(), Some(r#""C:\Program Files\\""#));
+        assert_eq!(quote_windows_arg(std::path::Path::new(r"C:\Data")).as_deref(), Some(r#""C:\Data""#));
+        assert_eq!(quote_windows_arg(std::path::Path::new(r#"C:\a"b"#)).as_deref(), Some(r#""C:\a\"b""#));
     }
 }

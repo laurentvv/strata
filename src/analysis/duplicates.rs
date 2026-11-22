@@ -70,43 +70,60 @@ fn file_id(path: &Path) -> Option<(u64, u64)> {
 
 /// One path per underlying file: hard links of the same file are not copies (deleting one frees
 /// nothing), so only the first name of each is kept. Paths whose identity cannot be read stay.
-fn distinct_files(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let ids: Vec<Option<(u64, u64)>> = paths.par_iter().map(|p| file_id(p)).collect();
+fn distinct_files(paths: Vec<PathBuf>, cancel: &AtomicBool) -> Option<Vec<PathBuf>> {
+    let ids: Vec<Option<(u64, u64)>> = paths
+        .par_iter()
+        .map(|p| {
+            if cancel.load(Ordering::Relaxed) {
+                None
+            } else {
+                file_id(p)
+            }
+        })
+        .collect();
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let mut seen = HashSet::new();
-    paths.into_iter().zip(ids).filter(|(_, id)| id.is_none_or(|i| seen.insert(i))).map(|(p, _)| p).collect()
+    Some(paths.into_iter().zip(ids).filter(|(_, id)| id.is_none_or(|i| seen.insert(i))).map(|(p, _)| p).collect())
 }
 
-fn hash_file(path: &Path, limit: Option<u64>) -> std::io::Result<[u8; 32]> {
-    let f = File::open(path)?;
-    let mut r: Box<dyn Read> = match limit {
-        Some(n) => Box::new(f.take(n)),
-        None => Box::new(f),
-    };
+fn hash_file(path: &Path, limit: Option<u64>, cancel: &AtomicBool, buf: &mut [u8]) -> std::io::Result<Option<[u8; 32]>> {
+    let mut f = File::open(path)?;
     let mut h = blake3::Hasher::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = r.read(&mut buf)?;
+    let mut remaining = limit.unwrap_or(u64::MAX);
+    while remaining > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let want = (remaining as usize).min(buf.len());
+        let n = f.read(&mut buf[..want])?;
         if n == 0 {
             break;
         }
         h.update(&buf[..n]);
+        remaining -= n as u64;
     }
-    Ok(*h.finalize().as_bytes())
+    Ok(Some(*h.finalize().as_bytes()))
 }
 
 /// Split `paths` into groups of equal hash (limit = bytes to hash, `None` = whole file).
 /// Unreadable files are dropped. Returns `None` if cancelled.
 fn regroup(paths: Vec<PathBuf>, limit: Option<u64>, cancel: &AtomicBool, done: &AtomicU64) -> Option<Vec<Vec<PathBuf>>> {
+    let buf_len = limit.map_or(256 * 1024, |n| (n as usize).clamp(4096, 256 * 1024));
     let hashed: Vec<Option<([u8; 32], PathBuf)>> = paths
         .into_par_iter()
-        .map(|p| {
-            if cancel.load(Ordering::Relaxed) {
-                return None;
-            }
-            let h = hash_file(&p, limit).ok();
-            done.fetch_add(1, Ordering::Relaxed);
-            h.map(|h| (h, p))
-        })
+        .map_init(
+            || vec![0u8; buf_len],
+            |buf, p| {
+                if cancel.load(Ordering::Relaxed) {
+                    return None;
+                }
+                let h = hash_file(&p, limit, cancel, buf).ok().flatten();
+                done.fetch_add(1, Ordering::Relaxed);
+                h.map(|h| (h, p))
+            },
+        )
         .collect();
     if cancel.load(Ordering::Relaxed) {
         return None;
@@ -133,7 +150,7 @@ pub fn find_duplicates_in(
         let mut paths = paths;
         paths.sort();
         let before = paths.len();
-        let paths = distinct_files(paths);
+        let paths = distinct_files(paths, cancel)?;
         done.fetch_add((before - paths.len()) as u64, Ordering::Relaxed); // progress counts them as handled
         if paths.len() < 2 {
             done.fetch_add(paths.len() as u64, Ordering::Relaxed);
