@@ -169,10 +169,20 @@ impl Default for MapStyle {
 struct TreemapKey {
     tree_gen: u64,
     root: NodeId,
-    w_bits: u32,
-    h_bits: u32,
+    w_key: u32,
+    h_key: u32,
     style: MapStyle,
     has_file_nodes: bool,
+}
+
+/// Canonicalise a treemap dimension for cache keying: non-finite / non-positive values map to 0
+/// (so `-0.0` and distinct NaN bit patterns never miss) and sub-pixel jitter is rounded to 0.5 px.
+fn dim_key(v: f32) -> u32 {
+    if !v.is_finite() || v <= 0.0 {
+        0
+    } else {
+        (v * 2.0).round() as u32
+    }
 }
 
 /// Memoised treemap layout so hovering / pointer motion never recomputes the squarification at 60 FPS.
@@ -204,8 +214,8 @@ impl TreemapCache {
         let key = TreemapKey {
             tree_gen,
             root,
-            w_bits: w.to_bits(),
-            h_bits: h.to_bits(),
+            w_key: dim_key(w),
+            h_key: dim_key(h),
             style: *style,
             has_file_nodes: tree.has_file_nodes(),
         };
@@ -838,5 +848,9 @@ mod tests {
         let style2 = MapStyle { by_type: false, ..style };
         cache.tiles_for(&tree, 2, Tree::ROOT, 640.0, 400.0, &style2, &opts);
         assert_eq!(cache.builds, 4);
+        // -0.0, 0.0 and NaN all map to the same canonical dimension key (no spurious rebuilds).
+        assert_eq!(dim_key(-0.0), dim_key(0.0));
+        assert_eq!(dim_key(f32::NAN), 0);
+        assert_eq!(dim_key(f32::INFINITY), 0);
     }
 }

@@ -360,8 +360,10 @@ pub struct App {
     oldest_cache: Option<Vec<views::RankedRow>>,
     cleanup_cache: Option<Vec<views::CleanRow>>,
     age_cache: Option<Vec<AgeBucket>>,
-    /// "System space" view: what the scan found, and the command last copied.
+    /// "System space" view: what the scan found, deduplicated root alloc cache, and the command last copied.
     system_cache: Option<Vec<crate::analysis::system_space::Found>>,
+    root_unique_alloc: Option<u64>,
+    props_hl: Option<(NodeId, u64, u64)>,
     system_copied: Option<String>,
     tree_gen: u64,
     treemap_cache: views::TreemapCache,
@@ -725,6 +727,8 @@ impl App {
             cleanup_cache: None,
             age_cache: None,
             system_cache: None,
+            root_unique_alloc: None,
+            props_hl: None,
             system_copied: None,
             tree_gen: 0,
             treemap_cache: views::TreemapCache::default(),
@@ -1068,6 +1072,8 @@ impl App {
         self.cleanup_cache = None;
         self.age_cache = None;
         self.system_cache = None;
+        self.root_unique_alloc = None;
+        self.props_hl = None;
         self.find_stale = true;
     }
 
@@ -2964,9 +2970,22 @@ impl App {
         if let (Some(id), Some(l)) = (self.props, &self.loaded) {
             if (id as usize) >= l.tree.nodes.len() {
                 self.props = None;
+                self.props_hl = None;
             } else {
                 let mut open = true;
                 let n = l.tree.get(id);
+                let hl = if n.is_dir {
+                    match self.props_hl {
+                        Some((cached_id, c, a)) if cached_id == id => (c, a),
+                        _ => {
+                            let (c, a) = l.tree.hardlink_dup_stats(id);
+                            self.props_hl = Some((id, c, a));
+                            (c, a)
+                        }
+                    }
+                } else {
+                    (0, 0)
+                };
                 egui::Window::new(tr("Properties")).open(&mut open).collapsible(false).show(ctx, |ui| {
                     ui.label(RichText::new(l.tree.path_of(id).to_string_lossy()).strong());
                     ui.separator();
@@ -2981,7 +3000,7 @@ impl App {
                         kv(&tr("Size"), format!("{} ({} bytes)", format_bytes(n.size), fmt::group_int(n.size)));
                         kv(&tr("Allocated"), format!("{} ({} bytes)", format_bytes(n.alloc), fmt::group_int(n.alloc)));
                         if n.is_dir {
-                            let (hl_count, hl_alloc) = l.tree.hardlink_dup_stats(id);
+                            let (hl_count, hl_alloc) = hl;
                             if hl_alloc > 0 {
                                 kv(
                                     &tr("Unique on disk"),
@@ -2997,6 +3016,7 @@ impl App {
                 });
                 if !open {
                     self.props = None;
+                    self.props_hl = None;
                 }
             }
         }

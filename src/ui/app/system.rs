@@ -117,7 +117,8 @@ impl App {
         let (drive, rel) = drive_and_rel(&l.root);
         let whole_drive = rel.is_empty();
         // When the MFT fast scan flagged secondary hard links, compare deduplicated disk usage against the volume.
-        let found_alloc = l.tree.unique_alloc(Tree::ROOT);
+        // Cached per tree generation so rendering the System tab stays O(1) per frame.
+        let found_alloc = *self.root_unique_alloc.get_or_insert_with(|| l.tree.unique_alloc(Tree::ROOT));
         let drive_used = if whole_drive { scan::drive_used_bytes(&l.root) } else { None };
         if self.system_cache.is_none() {
             let denied: HashSet<PathBuf> = l.error_list.iter().map(|e| e.path.clone()).collect();
